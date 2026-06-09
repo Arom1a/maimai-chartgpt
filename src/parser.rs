@@ -1,25 +1,72 @@
+use crate::schema::*;
 use nom::{
     IResult, Parser,
-    bytes::{complete::take_until, tag},
-    character::complete::{char, not_line_ending},
+    branch::alt,
+    bytes::complete::{tag, take_until},
+    character::complete::{char, line_ending, multispace0, not_line_ending},
+    multi::many0,
+    sequence::preceded,
 };
+use std::collections::HashMap;
 
-pub fn parse_metadata_line(input: &str) -> IResult<&str, (&str, &str)> {
+#[derive(Debug)]
+pub enum FileItem<'a> {
+    Metadata(&'a str, &'a str),
+    ChartSection { level: u8, raw: &'a str },
+}
+
+fn parse_metadata_line(input: &str) -> IResult<&str, FileItem<'_>> {
     let start = char('&');
     let key = take_until("=");
     let equal_sign = char('=');
     let value = not_line_ending;
+    let new_line = line_ending;
 
-    let (input, (_, key, _, value)) = (start, key, equal_sign, value).parse(input)?;
-    Ok((input, (key, value)))
+    let (input, (_, key, _, value, _)) = (start, key, equal_sign, value, new_line).parse(input)?;
+    Ok((input, FileItem::Metadata(key, value)))
 }
 
-pub fn parse_inote(input: &str) -> IResult<&str, (&str, &str)> {
+fn parse_inote_raw(input: &str) -> IResult<&str, FileItem<'_>> {
     let inote_tag = tag("&inote_");
     let level = take_until("=");
     let equal_sign = char('=');
-    let chart = take_until("E");
+    let raw_chart = take_until("\nE");
+    let end = tag("\nE");
 
-    let (input, (_, level, _, chart)) = (inote_tag, level, equal_sign, chart).parse(input)?;
-    Ok((input, (level, chart)))
+    let (input, (_, level, _, raw, _)) =
+        (inote_tag, level, equal_sign, raw_chart, end).parse(input)?;
+    let level = level.parse().unwrap();
+    let raw = raw.trim();
+    Ok((input, FileItem::ChartSection { level, raw }))
+}
+
+pub fn parse_file_items(input: &str) -> IResult<&str, Vec<FileItem<'_>>> {
+    many0(preceded(
+        multispace0,
+        alt((parse_inote_raw, parse_metadata_line)),
+    ))
+    .parse(input)
+}
+
+fn parse_constant(s: &str) -> (u8, u8) {
+    let mut parts = s.split('.');
+    let major = parts.next().unwrap().parse().unwrap();
+    let minor = parts.next().unwrap().parse().unwrap();
+    (major, minor)
+}
+
+pub fn parse_entire_file(input: &str) -> Result<ProcessedFile, nom::Err<nom::error::Error<&str>>> {
+    let (_, items) = parse_file_items(input)?;
+    let mut headers = HashMap::new();
+    let mut chart_sections = Vec::new();
+    for item in items {
+        match item {
+            FileItem::Metadata(key, value) => {
+                headers.insert(key, value);
+            }
+            FileItem::ChartSection { level, raw } => chart_sections.push((level, raw)),
+        }
+    }
+
+    todo!()
 }

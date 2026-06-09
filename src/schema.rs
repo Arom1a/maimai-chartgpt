@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-enum NoteKind {
+pub enum NoteKind {
     Tap,
     Hold,
     Slide,
@@ -9,7 +9,7 @@ enum NoteKind {
 }
 
 #[rustfmt::skip]
-enum Pos {
+pub enum Pos {
     // button 1-8
     Btn1, Btn2, Btn3, Btn4, Btn5, Btn6, Btn7, Btn8,
     // censor A 1-8
@@ -24,14 +24,14 @@ enum Pos {
     E1, E2, E3, E4, E5, E6, E7, E8,
 }
 
-enum NoteDecoration {
+pub enum NoteDecoration {
     Break,
     Ex,
     PseudoEach,
     Firework,
 }
 
-enum SlideShape {
+pub enum SlideShape {
     Straight,     // -
     ArcLeft,      // <, do not use ^, auto convert to left/right
     ArcRight,     // >
@@ -46,19 +46,19 @@ enum SlideShape {
     Fan,          // w
 }
 
-struct SlideSegment {
+pub struct SlideSegment {
     shape: SlideShape,
     end: Pos,
 }
 
-enum SlideDeco {
+pub enum SlideDeco {
     Break,
     // omitted as not present in normal charts
     // Fade,
     // StarVisible
 }
 
-struct Note {
+pub struct Note {
     timestamp: u64,
     kind: NoteKind,
     pos: Pos,
@@ -68,13 +68,13 @@ struct Note {
     slide_deco: BTreeSet<SlideDeco>,
 }
 
-struct Chart {
-    constant: (u8, u8),
+pub struct Chart {
+    constant: (u8, u8), // major, minor
     designer: String,
     notes: Vec<Note>,
 }
 
-struct BpmRecord {
+pub struct BpmRecord {
     bpm: u32,
     timestamp: u64,
 }
@@ -84,7 +84,7 @@ enum Cabinet {
     DX,
 }
 
-struct ProcessedFile {
+pub struct ProcessedFile {
     title: String,
     cabinet: Cabinet,
     version: String,
@@ -93,6 +93,6 @@ struct ProcessedFile {
 }
 
 // TODO: invariants for files and each note kind
-fn check_invariant() -> bool {
+pub fn check_invariant() -> bool {
     todo!()
 }
