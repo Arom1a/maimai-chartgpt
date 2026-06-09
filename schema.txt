@@ -1,19 +1,21 @@
 bpm list,
 note {
-    timestamp, pos, note_deco, duration, slide_deco, segments
+    timestamp, type, pos, note_deco, duration, segments, slide_deco
 }
 
 ---
 
+time should be represented as "truncate f32 at 2nd precise and times 100"
+
 bpm list: {
     [(timestamp, bpm_change)]
 }
-timestamp: f32
+timestamp: u64
 pos: 1-8, 9-42 (for A1-8, B, ..., C, D, E for touches)
 note_deco: {
     break, ex, pseudo_each, firework
 }
-duration: f32
+duration: u64
 slide_deco: {
     break
 }
@@ -50,8 +52,8 @@ timestamp (slide head time)
 pos (slide start pos)
 note_deco (slide head deco)
 duration (trace duration, not counting wating beat)
-slide_deco (trace deco)
 segments (list of (shape, end_pos) for each segment)
+slide_deco (trace deco)
 <!-- fade (`?`, `!`) (omitted as not present in my dataset) -->
 <!-- star_visible (`@`, `$`) (omitted as not present in my dataset) -->
 
