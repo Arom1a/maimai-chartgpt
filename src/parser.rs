@@ -2,10 +2,11 @@ use crate::schema::*;
 use nom::{
     IResult, Parser,
     branch::alt,
-    bytes::complete::{tag, take_until},
-    character::complete::{char, line_ending, multispace0, not_line_ending},
+    bytes::complete::{tag, take_until, take_while},
+    character::complete::{char, digit1, line_ending, multispace0, not_line_ending, space0},
+    combinator::{map, map_res, recognize},
     multi::many0,
-    sequence::preceded,
+    sequence::{delimited, preceded, terminated},
 };
 use std::collections::HashMap;
 
@@ -33,8 +34,13 @@ fn parse_inote_raw(input: &str) -> IResult<&str, FileItem<'_>> {
     let raw_chart = take_until("\nE");
     let end = tag("\nE");
 
-    let (input, (_, level, _, raw, _)) =
-        (inote_tag, level, equal_sign, raw_chart, end).parse(input)?;
+    let (input, (_, level, _, raw)) = (
+        inote_tag,
+        level,
+        equal_sign,
+        recognize(terminated(raw_chart, end)),
+    )
+        .parse(input)?;
     let level = level.parse().unwrap();
     let raw = raw.trim();
     Ok((input, FileItem::ChartSection { level, raw }))
@@ -82,8 +88,61 @@ impl TimingState {
     }
 }
 
-fn parse_simai_tokens(input: &str) -> IResult<&str, Vec<SimaiToken>> {
+fn parse_segment(input: &str) -> IResult<&str, Vec<SimaiToken>> {
+    let token_bpm = map_res(delimited(char('('), digit1, char(')')), |s: &str| {
+        s.parse().map(SimaiToken::BpmChange)
+    });
+    let token_divider = map_res(delimited(char('{'), digit1, char('}')), |s: &str| {
+        s.parse().map(SimaiToken::DividerChange)
+    });
+    fn token_note_or_empty(input: &str) -> IResult<&str, SimaiToken> {
+        // TODO: cleanup
+        let (rest, content) = take_while(|c: char| c != ',')(input)?;
+        let trimmed = content.trim();
+        if trimmed == "E" {
+            // leave 'E' for the end parser; don't consume it as a note.
+            return Err(nom::Err::Error(nom::error::Error::new(
+                rest,
+                nom::error::ErrorKind::Fail,
+            )));
+        }
+        if trimmed.is_empty() {
+            Ok((rest, SimaiToken::Empty))
+        } else {
+            Ok((rest, SimaiToken::Note(trimmed)))
+        }
+    }
+    let token_end = map(tag("E"), |_| SimaiToken::End);
     todo!()
+}
+
+fn parse_simai_tokens(input: &str) -> IResult<&str, Vec<SimaiToken>> {
+    let mut tokens = Vec::new();
+    let mut rest = input;
+
+    loop {
+        let seg = match rest.find(',') {
+            Some(comma_pos) => {
+                let rtn = rest[..comma_pos].trim();
+                rest = &rest[comma_pos + 1..];
+                rtn
+            }
+            None => {
+                let rtn = rest.trim();
+                rest = "";
+                rtn
+            }
+        };
+
+        let (_, mut notes) = parse_segment(seg)?;
+        tokens.append(&mut notes);
+
+        if rest.is_empty() {
+            break;
+        }
+    }
+
+    Ok((rest, tokens))
 }
 
 //                                                 we use a vector here in case the string represent an each
