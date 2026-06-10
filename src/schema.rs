@@ -92,6 +92,7 @@ pub struct ProcessedFile {
     pub charts: Vec<Chart>,
 }
 
+#[derive(Debug)]
 pub enum SimaiToken<'a> {
     BpmChange(u32),
     DividerChange(f64),

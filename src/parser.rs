@@ -2,9 +2,9 @@ use crate::schema::*;
 use nom::{
     IResult, Parser,
     branch::alt,
-    bytes::complete::{tag, take_until, take_while},
-    character::complete::{char, digit1, line_ending, multispace0, not_line_ending, space0},
-    combinator::{map, map_res, recognize},
+    bytes::complete::{tag, take_until, take_while1},
+    character::complete::{char, line_ending, multispace0, not_line_ending},
+    combinator::{map_res, recognize},
     multi::many0,
     sequence::{delimited, preceded, terminated},
 };
@@ -89,31 +89,48 @@ impl TimingState {
 }
 
 fn parse_segment(input: &str) -> IResult<&str, Vec<SimaiToken>> {
-    let token_bpm = map_res(delimited(char('('), digit1, char(')')), |s: &str| {
-        s.parse().map(SimaiToken::BpmChange)
-    });
-    let token_divider = map_res(delimited(char('{'), digit1, char('}')), |s: &str| {
-        s.parse().map(SimaiToken::DividerChange)
-    });
-    fn token_note_or_empty(input: &str) -> IResult<&str, SimaiToken> {
-        // TODO: cleanup
-        let (rest, content) = take_while(|c: char| c != ',')(input)?;
-        let trimmed = content.trim();
-        if trimmed == "E" {
-            // leave 'E' for the end parser; don't consume it as a note.
-            return Err(nom::Err::Error(nom::error::Error::new(
-                rest,
-                nom::error::ErrorKind::Fail,
-            )));
-        }
-        if trimmed.is_empty() {
-            Ok((rest, SimaiToken::Empty))
+    fn parse_bpm(input: &str) -> IResult<&str, SimaiToken> {
+        map_res(
+            delimited(char('('), take_while1(|c: char| c.is_digit(10)), char(')')),
+            |s: &str| s.parse().map(SimaiToken::BpmChange),
+        )
+        .parse(input)
+    }
+    fn parse_divider(input: &str) -> IResult<&str, SimaiToken> {
+        map_res(
+            delimited(char('{'), take_while1(|c: char| c.is_digit(10)), char('}')),
+            |s: &str| s.parse().map(SimaiToken::DividerChange),
+        )
+        .parse(input)
+    }
+    fn parse_note_or_empty(input: &str) -> IResult<&str, SimaiToken> {
+        if input.is_empty() {
+            Ok(("", SimaiToken::Empty))
+        } else if input == "E" {
+            Ok(("", SimaiToken::End))
         } else {
-            Ok((rest, SimaiToken::Note(trimmed)))
+            Ok(("", SimaiToken::Note(input)))
         }
     }
-    let token_end = map(tag("E"), |_| SimaiToken::End);
-    todo!()
+
+    let mut rtn = Vec::new();
+    let mut rest = input;
+    loop {
+        rest = rest.trim();
+        if let Ok((remain, bpm)) = parse_bpm(rest) {
+            rtn.push(bpm);
+            rest = remain;
+        } else if let Ok((remain, div)) = parse_divider(rest) {
+            rtn.push(div);
+            rest = remain;
+        } else {
+            let (_, token) = parse_note_or_empty(rest)?;
+            rtn.push(token);
+            break;
+        }
+    }
+
+    Ok((rest, rtn))
 }
 
 fn parse_simai_tokens(input: &str) -> IResult<&str, Vec<SimaiToken>> {
@@ -142,6 +159,8 @@ fn parse_simai_tokens(input: &str) -> IResult<&str, Vec<SimaiToken>> {
         }
     }
 
+    println!("{}", input);
+    println!("{:?}", tokens);
     Ok((rest, tokens))
 }
 
