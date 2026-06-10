@@ -55,8 +55,72 @@ fn parse_constant(s: &str) -> (u8, u8) {
     (major, minor)
 }
 
-fn parse_raw_chart(input: &str) -> (Vec<BpmRecord>, Vec<Note>) {
+struct TimingState {
+    bpm: u32,
+    divider: f64,
+    curr_time_ms: f64,
+    bpm_list: Vec<BpmRecord>,
+}
+impl TimingState {
+    fn new() -> Self {
+        Self {
+            bpm: 0,
+            divider: 1.0,
+            curr_time_ms: 0.0,
+            bpm_list: Vec::new(),
+        }
+    }
+
+    fn beat_duration_ms(&self) -> f64 {
+        // let the BPM value is B and the length divider is T,
+        // per-comma length = 240 / B / T (seconds)
+        240.0 / self.bpm as f64 / self.divider * 1000.0
+    }
+
+    fn advance(&mut self) {
+        self.curr_time_ms += self.beat_duration_ms();
+    }
+}
+
+fn parse_simai_tokens(input: &str) -> IResult<&str, Vec<SimaiToken>> {
     todo!()
+}
+
+//                                                 we use a vector here in case the string represent an each
+fn parse_note_string(input: &str) -> IResult<&str, Vec<Note>> {
+    todo!()
+}
+
+fn parse_raw_chart(input: &str) -> IResult<&str, (Vec<BpmRecord>, Vec<Note>)> {
+    let mut state = TimingState::new();
+    let mut notes = Vec::new();
+
+    let (rest, tokens) = parse_simai_tokens(input)?;
+
+    for token in tokens {
+        match token {
+            SimaiToken::BpmChange(bpm) => {
+                todo!();
+                // continue here since bpmchange does not update the time state
+                continue;
+            }
+            SimaiToken::DividerChange(divider) => {
+                todo!()
+            }
+            SimaiToken::Empty => {}
+            SimaiToken::Note(note_string) => {
+                let (rest, mut note) = parse_note_string(note_string)?;
+                assert!(rest == "");
+                notes.append(&mut note);
+            }
+            SimaiToken::End => {
+                break;
+            }
+        }
+        state.advance();
+    }
+
+    Ok((todo!(), (state.bpm_list, notes)))
 }
 
 pub fn parse_entire_file(input: &str) -> Result<ProcessedFile, nom::Err<nom::error::Error<&str>>> {
@@ -79,6 +143,7 @@ pub fn parse_entire_file(input: &str) -> Result<ProcessedFile, nom::Err<nom::err
         _ => panic!(),
     };
     let version = headers.get("version").unwrap().to_string();
+    assert!(headers.get("first").is_none()); // not present in my dataset, so assert here for future reference
 
     let mut all_charts = Vec::new();
 
@@ -88,7 +153,7 @@ pub fn parse_entire_file(input: &str) -> Result<ProcessedFile, nom::Err<nom::err
         let des_key = format!("des_{}", level);
         let designer = headers.get(des_key.as_str()).unwrap().to_string();
 
-        let (bpm_list, notes) = parse_raw_chart(raw);
+        let (rest, (bpm_list, notes)) = parse_raw_chart(raw)?;
 
         all_charts.push(Chart {
             constant,

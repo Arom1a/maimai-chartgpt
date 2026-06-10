@@ -43,12 +43,12 @@ pub enum SlideShape {
     PP,           // TODO
     QQ,           // TODO
     Reflect(Pos), // V
-    Fan,          // w
+    Wifi,         // w
 }
 
 pub struct SlideSegment {
-    shape: SlideShape,
-    end: Pos,
+    pub shape: SlideShape,
+    pub end: Pos,
 }
 
 pub enum SlideDeco {
@@ -59,13 +59,13 @@ pub enum SlideDeco {
 }
 
 pub struct Note {
-    timestamp: u64,
-    kind: NoteKind,
-    pos: Pos,
-    deco: BTreeSet<NoteDecoration>,
-    duration: Option<u64>,
-    slide_segments: Vec<SlideSegment>,
-    slide_deco: BTreeSet<SlideDeco>,
+    pub timestamp: u64,
+    pub kind: NoteKind,
+    pub pos: Pos,
+    pub deco: BTreeSet<NoteDecoration>,
+    pub duration: Option<u64>,
+    pub slide_segments: Vec<SlideSegment>,
+    pub slide_deco: BTreeSet<SlideDeco>,
 }
 
 pub struct Chart {
@@ -76,8 +76,8 @@ pub struct Chart {
 }
 
 pub struct BpmRecord {
-    bpm: u32,
-    timestamp: u64,
+    pub bpm: u32,
+    pub timestamp: u64,
 }
 
 pub enum Cabinet {
@@ -90,6 +90,14 @@ pub struct ProcessedFile {
     pub cabinet: Cabinet,
     pub version: String,
     pub charts: Vec<Chart>,
+}
+
+pub enum SimaiToken<'a> {
+    BpmChange(u32),
+    DividerChange(f64),
+    Empty,
+    Note(&'a str),
+    End,
 }
 
 // TODO: invariants for files and each note kind
