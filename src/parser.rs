@@ -55,6 +55,10 @@ fn parse_constant(s: &str) -> (u8, u8) {
     (major, minor)
 }
 
+fn parse_raw_chart(input: &str) -> (Vec<BpmRecord>, Vec<Note>) {
+    todo!()
+}
+
 pub fn parse_entire_file(input: &str) -> Result<ProcessedFile, nom::Err<nom::error::Error<&str>>> {
     let (_, items) = parse_file_items(input)?;
     let mut headers = HashMap::new();
@@ -68,5 +72,36 @@ pub fn parse_entire_file(input: &str) -> Result<ProcessedFile, nom::Err<nom::err
         }
     }
 
-    todo!()
+    let title = headers.get("title").unwrap().to_string();
+    let cabinet = match *headers.get("cabinet").unwrap() {
+        "SD" => Cabinet::SD,
+        "DX" => Cabinet::DX,
+        _ => panic!(),
+    };
+    let version = headers.get("version").unwrap().to_string();
+
+    let mut all_charts = Vec::new();
+
+    for (level, raw) in chart_sections {
+        let lv_key = format!("lv_{}", level);
+        let constant = parse_constant(&headers.get(lv_key.as_str()).unwrap());
+        let des_key = format!("des_{}", level);
+        let designer = headers.get(des_key.as_str()).unwrap().to_string();
+
+        let (bpm_list, notes) = parse_raw_chart(raw);
+
+        all_charts.push(Chart {
+            constant,
+            designer,
+            bpm_list,
+            notes,
+        });
+    }
+
+    Ok(ProcessedFile {
+        title,
+        cabinet,
+        version,
+        charts: all_charts,
+    })
 }

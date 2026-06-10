@@ -69,9 +69,10 @@ pub struct Note {
 }
 
 pub struct Chart {
-    constant: (u8, u8), // major, minor
-    designer: String,
-    notes: Vec<Note>,
+    pub constant: (u8, u8), // major, minor
+    pub designer: String,
+    pub bpm_list: Vec<BpmRecord>,
+    pub notes: Vec<Note>,
 }
 
 pub struct BpmRecord {
@@ -79,17 +80,16 @@ pub struct BpmRecord {
     timestamp: u64,
 }
 
-enum Cabinet {
+pub enum Cabinet {
     SD,
     DX,
 }
 
 pub struct ProcessedFile {
-    title: String,
-    cabinet: Cabinet,
-    version: String,
-    bpm_list: Vec<BpmRecord>,
-    charts: Vec<Chart>,
+    pub title: String,
+    pub cabinet: Cabinet,
+    pub version: String,
+    pub charts: Vec<Chart>,
 }
 
 // TODO: invariants for files and each note kind
