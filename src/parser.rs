@@ -4,11 +4,11 @@ use nom::{
     branch::alt,
     bytes::complete::{tag, take_until, take_while1},
     character::complete::{char, line_ending, multispace0, not_line_ending, one_of},
-    combinator::{map, map_res, opt, recognize},
+    combinator::{all_consuming, map, map_res, opt, recognize},
     multi::many0,
     sequence::{delimited, preceded, terminated},
 };
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 #[derive(Debug)]
 pub enum FileItem<'a> {
@@ -88,22 +88,22 @@ impl TimingState {
     }
 }
 
-fn parse_segment(input: &str) -> IResult<&str, Vec<SimaiToken>> {
-    fn parse_bpm(input: &str) -> IResult<&str, SimaiToken> {
+fn parse_segment(input: &str) -> IResult<&str, Vec<SimaiToken<'_>>> {
+    fn parse_bpm(input: &str) -> IResult<&str, SimaiToken<'_>> {
         map_res(
             delimited(char('('), take_while1(|c: char| c.is_digit(10)), char(')')),
             |s: &str| s.parse().map(SimaiToken::BpmChange),
         )
         .parse(input)
     }
-    fn parse_divider(input: &str) -> IResult<&str, SimaiToken> {
+    fn parse_divider(input: &str) -> IResult<&str, SimaiToken<'_>> {
         map_res(
             delimited(char('{'), take_while1(|c: char| c.is_digit(10)), char('}')),
             |s: &str| s.parse().map(SimaiToken::DividerChange),
         )
         .parse(input)
     }
-    fn parse_note_or_empty(input: &str) -> IResult<&str, SimaiToken> {
+    fn parse_note_or_empty(input: &str) -> IResult<&str, SimaiToken<'_>> {
         if input.is_empty() {
             Ok(("", SimaiToken::Empty))
         } else if input == "E" {
@@ -133,7 +133,7 @@ fn parse_segment(input: &str) -> IResult<&str, Vec<SimaiToken>> {
     Ok((rest, rtn))
 }
 
-fn parse_simai_tokens(input: &str) -> IResult<&str, Vec<SimaiToken>> {
+fn parse_simai_tokens(input: &str) -> IResult<&str, Vec<SimaiToken<'_>>> {
     let mut tokens = Vec::new();
     let mut rest = input;
 
@@ -166,42 +166,108 @@ fn parse_simai_tokens(input: &str) -> IResult<&str, Vec<SimaiToken>> {
 
 fn parse_starting_pos(input: &str) -> IResult<&str, Pos> {
     alt((
-        map(one_of("12345678"), |btn| {
-            (None, btn)
-                .try_into()
-                .expect("cannot fail as it was checked by the `one_of`")
-        }),
-        map((one_of("ABDE"), one_of("12345678")), |(s, n)| {
-            (Some(s), n).try_into().unwrap()
+        map_res(one_of("12345678"), |btn| (None, btn).try_into()),
+        map_res((one_of("ABDE"), one_of("12345678")), |(s, n)| {
+            (Some(s), n).try_into()
         }),
         map(preceded(char('C'), opt(one_of("12"))), |_| Pos::C),
     ))
     .parse(input)
 }
 
-fn parse_single_note<'a>(input: &'a str, starting_pos: &Pos) -> IResult<&'a str, UnresolvedNote> {
+fn parse_decoration_and_hold(input: &str) -> IResult<&str, (BTreeSet<NoteDecoration>, bool)> {
     todo!()
+}
+
+fn parse_slide_segments(input: &str) -> IResult<&str, Vec<SlideSegment>> {
+    todo!()
+}
+
+fn parse_slide_decoration(input: &str) -> IResult<&str, BTreeSet<SlideDeco>> {
+    todo!()
+}
+
+fn parse_duration_expression(input: &str) -> IResult<&str, DurationExpr> {
+    todo!()
+}
+
+fn parse_single_note(input: &str, starting_pos: Pos) -> IResult<&str, UnresolvedNote> {
+    let (rest, (deco, is_hold)) = parse_decoration_and_hold(input)?;
+
+    if is_hold {
+        let (rest, dur_expr) = parse_duration_expression(rest)?;
+        let kind = if starting_pos.is_button() {
+            NoteKind::Hold
+        } else {
+            NoteKind::TouchHold
+        };
+        return Ok((
+            rest,
+            UnresolvedNote {
+                kind,
+                pos: starting_pos,
+                deco,
+                duration_expr: Some(dur_expr),
+                slide_segments: vec![],
+                slide_deco: BTreeSet::new(),
+            },
+        ));
+    }
+
+    if let Ok((rest, segments)) = parse_slide_segments(rest) {
+        let (rest, slide_deco) = parse_slide_decoration(rest)?;
+        let (rest, duration_expr) = opt(parse_duration_expression).parse(rest)?;
+        assert!(duration_expr.is_some());
+        return Ok((
+            rest,
+            UnresolvedNote {
+                kind: NoteKind::Slide,
+                pos: starting_pos,
+                deco,
+                duration_expr,
+                slide_segments: segments,
+                slide_deco,
+            },
+        ));
+    }
+
+    let kind = if starting_pos.is_button() {
+        NoteKind::Tap
+    } else {
+        NoteKind::Touch
+    };
+    Ok((
+        rest,
+        UnresolvedNote {
+            kind,
+            pos: starting_pos,
+            deco,
+            duration_expr: None,
+            slide_segments: vec![],
+            slide_deco: BTreeSet::new(),
+        },
+    ))
 }
 
 //                                                 we use a vector here in case the string represent an each
 //                                                 or multiple slides
 fn parse_note_string(input: &str) -> IResult<&str, Vec<UnresolvedNote>> {
     println!("{}", input);
-
     let mut rtn = Vec::new();
 
     // first split by '/' and then by '*'
     for sub_str in input.split('/') {
-        let (single_note, starting_pos) = parse_starting_pos(sub_str)?;
+        let (rest, starting_pos) = parse_starting_pos(sub_str)?;
 
-        for sub_note in sub_str.split('*') {
-            rtn.push(parse_single_note(single_note, &starting_pos)?.1);
+        for sub_note in rest.split('*') {
+            // then parse each part
+            let (_, note) =
+                all_consuming(|s| parse_single_note(s, starting_pos)).parse(sub_note)?;
+            rtn.push(note);
         }
     }
 
-    // then parse each part
-
-    Ok((todo!(), rtn))
+    Ok(("", rtn))
 }
 
 fn parse_raw_chart(input: &str) -> IResult<&str, (Vec<BpmRecord>, Vec<Note>)> {
@@ -230,7 +296,7 @@ fn parse_raw_chart(input: &str) -> IResult<&str, (Vec<BpmRecord>, Vec<Note>)> {
             }
             SimaiToken::Empty => {}
             SimaiToken::Note(note_string) => {
-                let (rest, parsed_notes) = parse_note_string(note_string)?;
+                let (_, parsed_notes) = parse_note_string(note_string)?;
                 let mut resolved_notes = parsed_notes
                     .into_iter()
                     .map(|note| Note {
@@ -238,12 +304,11 @@ fn parse_raw_chart(input: &str) -> IResult<&str, (Vec<BpmRecord>, Vec<Note>)> {
                         kind: note.kind,
                         pos: note.pos,
                         deco: note.deco,
-                        duration: note.duration.map(|expr| expr.resolve_ms(state.bpm)),
+                        duration: note.duration_expr.map(|expr| expr.resolve_ms(state.bpm)),
                         slide_segments: note.slide_segments,
                         slide_deco: note.slide_deco,
                     })
                     .collect();
-                assert!(rest == "");
                 notes.append(&mut resolved_notes);
             }
             SimaiToken::End => {

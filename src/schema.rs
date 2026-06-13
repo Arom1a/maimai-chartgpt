@@ -10,7 +10,7 @@ pub enum NoteKind {
 }
 
 #[rustfmt::skip]
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone, Copy)]
 pub enum Pos {
     // button 1-8
     Btn1, Btn2, Btn3, Btn4, Btn5, Btn6, Btn7, Btn8,
@@ -24,6 +24,21 @@ pub enum Pos {
     D1, D2, D3, D4, D5, D6, D7, D8,
     // censor E
     E1, E2, E3, E4, E5, E6, E7, E8,
+}
+
+impl Pos {
+    #[rustfmt::skip]
+    pub fn is_button(&self) -> bool {
+        matches!(
+            self,
+              Pos::Btn1 | Pos::Btn2 | Pos::Btn3 | Pos::Btn4
+            | Pos::Btn5 | Pos::Btn6 | Pos::Btn7 | Pos::Btn8
+        )
+    }
+
+    pub fn is_touch(&self) -> bool {
+        !self.is_button()
+    }
 }
 
 impl TryFrom<(Option<char>, char)> for Pos {
@@ -126,7 +141,7 @@ pub struct UnresolvedNote {
     pub kind: NoteKind,
     pub pos: Pos,
     pub deco: BTreeSet<NoteDecoration>,
-    pub duration: Option<DurationExpr>,
+    pub duration_expr: Option<DurationExpr>,
     pub slide_segments: Vec<SlideSegment>,
     pub slide_deco: BTreeSet<SlideDeco>,
 }
