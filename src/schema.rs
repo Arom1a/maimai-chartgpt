@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 
+#[derive(Debug, PartialEq)]
 pub enum NoteKind {
     Tap,
     Hold,
@@ -9,6 +10,7 @@ pub enum NoteKind {
 }
 
 #[rustfmt::skip]
+#[derive(Debug, PartialEq)]
 pub enum Pos {
     // button 1-8
     Btn1, Btn2, Btn3, Btn4, Btn5, Btn6, Btn7, Btn8,
@@ -24,6 +26,50 @@ pub enum Pos {
     E1, E2, E3, E4, E5, E6, E7, E8,
 }
 
+impl TryFrom<(Option<char>, char)> for Pos {
+    type Error = nom::Err<nom::error::Error<&'static str>>;
+
+    #[rustfmt::skip]
+    fn try_from((sensor, btn): (Option<char>, char)) -> Result<Self, Self::Error> {
+        let err = Err(nom::Err::Error(nom::error::Error::new(
+            "invalid position",
+            nom::error::ErrorKind::Char,
+        )));
+        match sensor {
+            None => match btn {
+                '1' => Ok(Pos::Btn1), '2' => Ok(Pos::Btn2), '3' => Ok(Pos::Btn3), '4' => Ok(Pos::Btn4),
+                '5' => Ok(Pos::Btn5), '6' => Ok(Pos::Btn6), '7' => Ok(Pos::Btn7), '8' => Ok(Pos::Btn8),
+                _ => err,
+            },
+            Some('A') => match btn {
+                '1' => Ok(Pos::A1), '2' => Ok(Pos::A2), '3' => Ok(Pos::A3), '4' => Ok(Pos::A4),
+                '5' => Ok(Pos::A5), '6' => Ok(Pos::A6), '7' => Ok(Pos::A7), '8' => Ok(Pos::A8),
+                _ => err,
+            },
+            Some('B') => match btn {
+                '1' => Ok(Pos::B1), '2' => Ok(Pos::B2), '3' => Ok(Pos::B3), '4' => Ok(Pos::B4),
+                '5' => Ok(Pos::B5), '6' => Ok(Pos::B6), '7' => Ok(Pos::B7), '8' => Ok(Pos::B8),
+                _ => err,
+            },
+            Some('C') => match btn {
+                '1' => Ok(Pos::C), '2' => Ok(Pos::C), _ => err,
+            },
+            Some('D') => match btn {
+                '1' => Ok(Pos::D1), '2' => Ok(Pos::D2), '3' => Ok(Pos::D3), '4' => Ok(Pos::D4),
+                '5' => Ok(Pos::D5), '6' => Ok(Pos::D6), '7' => Ok(Pos::D7), '8' => Ok(Pos::D8),
+                _ => err,
+            },
+            Some('E') => match btn {
+                '1' => Ok(Pos::E1), '2' => Ok(Pos::E2), '3' => Ok(Pos::E3), '4' => Ok(Pos::E4),
+                '5' => Ok(Pos::E5), '6' => Ok(Pos::E6), '7' => Ok(Pos::E7), '8' => Ok(Pos::E8),
+                _ => err,
+            },
+            _ => err,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq)]
 pub enum NoteDecoration {
     Break,
     Ex,
@@ -31,6 +77,7 @@ pub enum NoteDecoration {
     Firework,
 }
 
+#[derive(Debug, PartialEq)]
 pub enum SlideShape {
     Straight,     // -
     ArcLeft,      // <, do not use ^, auto convert to left/right
@@ -46,11 +93,13 @@ pub enum SlideShape {
     Wifi,         // w
 }
 
+#[derive(Debug, PartialEq)]
 pub struct SlideSegment {
     pub shape: SlideShape,
     pub end: Pos,
 }
 
+#[derive(Debug, PartialEq)]
 pub enum SlideDeco {
     Break,
     // omitted as not present in normal charts
@@ -58,6 +107,31 @@ pub enum SlideDeco {
     // StarVisible
 }
 
+#[derive(Debug, PartialEq)]
+pub enum DurationExpr {
+    DividerMultiplier(f64, u32),
+    // omitted as not present in my dataset
+    // AbsoluteMs(f64),
+    // BpmDM(u32, f64, u32),
+}
+
+impl DurationExpr {
+    pub fn resolve_ms(&self, bpm: u32) -> u64 {
+        todo!()
+    }
+}
+
+#[derive(Debug, PartialEq)]
+pub struct UnresolvedNote {
+    pub kind: NoteKind,
+    pub pos: Pos,
+    pub deco: BTreeSet<NoteDecoration>,
+    pub duration: Option<DurationExpr>,
+    pub slide_segments: Vec<SlideSegment>,
+    pub slide_deco: BTreeSet<SlideDeco>,
+}
+
+#[derive(Debug, PartialEq)]
 pub struct Note {
     pub timestamp: u64,
     pub kind: NoteKind,

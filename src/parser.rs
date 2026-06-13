@@ -3,8 +3,8 @@ use nom::{
     IResult, Parser,
     branch::alt,
     bytes::complete::{tag, take_until, take_while1},
-    character::complete::{char, line_ending, multispace0, not_line_ending},
-    combinator::{map_res, recognize},
+    character::complete::{char, line_ending, multispace0, not_line_ending, one_of},
+    combinator::{map, map_res, opt, recognize},
     multi::many0,
     sequence::{delimited, preceded, terminated},
 };
@@ -164,9 +164,44 @@ fn parse_simai_tokens(input: &str) -> IResult<&str, Vec<SimaiToken>> {
     Ok((rest, tokens))
 }
 
-//                                                 we use a vector here in case the string represent an each
-fn parse_note_string(input: &str) -> IResult<&str, Vec<Note>> {
+fn parse_starting_pos(input: &str) -> IResult<&str, Pos> {
+    alt((
+        map(one_of("12345678"), |btn| {
+            (None, btn)
+                .try_into()
+                .expect("cannot fail as it was checked by the `one_of`")
+        }),
+        map((one_of("ABDE"), one_of("12345678")), |(s, n)| {
+            (Some(s), n).try_into().unwrap()
+        }),
+        map(preceded(char('C'), opt(one_of("12"))), |_| Pos::C),
+    ))
+    .parse(input)
+}
+
+fn parse_single_note<'a>(input: &'a str, starting_pos: &Pos) -> IResult<&'a str, UnresolvedNote> {
     todo!()
+}
+
+//                                                 we use a vector here in case the string represent an each
+//                                                 or multiple slides
+fn parse_note_string(input: &str) -> IResult<&str, Vec<UnresolvedNote>> {
+    println!("{}", input);
+
+    let mut rtn = Vec::new();
+
+    // first split by '/' and then by '*'
+    for sub_str in input.split('/') {
+        let (single_note, starting_pos) = parse_starting_pos(sub_str)?;
+
+        for sub_note in sub_str.split('*') {
+            rtn.push(parse_single_note(single_note, &starting_pos)?.1);
+        }
+    }
+
+    // then parse each part
+
+    Ok((todo!(), rtn))
 }
 
 fn parse_raw_chart(input: &str) -> IResult<&str, (Vec<BpmRecord>, Vec<Note>)> {
@@ -178,18 +213,38 @@ fn parse_raw_chart(input: &str) -> IResult<&str, (Vec<BpmRecord>, Vec<Note>)> {
     for token in tokens {
         match token {
             SimaiToken::BpmChange(bpm) => {
-                todo!();
+                if state.bpm != bpm {
+                    state.bpm_list.push(BpmRecord {
+                        bpm,
+                        timestamp: state.curr_time_ms as _,
+                    });
+                    state.bpm = bpm;
+                }
                 // continue here since bpmchange does not update the time state
                 continue;
             }
             SimaiToken::DividerChange(divider) => {
-                todo!()
+                state.divider = divider;
+                // continue for the same reason
+                continue;
             }
             SimaiToken::Empty => {}
             SimaiToken::Note(note_string) => {
-                let (rest, mut note) = parse_note_string(note_string)?;
+                let (rest, parsed_notes) = parse_note_string(note_string)?;
+                let mut resolved_notes = parsed_notes
+                    .into_iter()
+                    .map(|note| Note {
+                        timestamp: state.curr_time_ms as _,
+                        kind: note.kind,
+                        pos: note.pos,
+                        deco: note.deco,
+                        duration: note.duration.map(|expr| expr.resolve_ms(state.bpm)),
+                        slide_segments: note.slide_segments,
+                        slide_deco: note.slide_deco,
+                    })
+                    .collect();
                 assert!(rest == "");
-                notes.append(&mut note);
+                notes.append(&mut resolved_notes);
             }
             SimaiToken::End => {
                 break;
@@ -247,4 +302,69 @@ pub fn parse_entire_file(input: &str) -> Result<ProcessedFile, nom::Err<nom::err
         version,
         charts: all_charts,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn note_string_tap1() {
+        let input = "1";
+        let (rest, output) = parse_note_string(input).unwrap();
+        let note = Note {
+            timestamp: 0,
+            kind: NoteKind::Tap,
+            pos: Pos::Btn1,
+            deco: BTreeSet::new(),
+            duration: None,
+            slide_segments: Vec::new(),
+            slide_deco: BTreeSet::new(),
+        };
+        assert!(rest.is_empty());
+        // assert_eq!(output, vec![note]);
+    }
+    #[test]
+    fn note_string_tap2() {
+        let input = "8";
+    }
+
+    #[test]
+    fn note_string_each1() {
+        let input = "1/8";
+    }
+    #[test]
+    fn note_string_each2() {
+        let input = "7/3";
+    }
+
+    #[test]
+    fn note_string_hold1() {
+        let input = "2h[8:5]";
+    }
+    #[test]
+    fn note_string_hold2() {
+        let input = "4h[2:7]";
+    }
+    fn note_string_hold3() {
+        let input = "7h[4:0]";
+    }
+    fn note_string_hold4() {
+        let input = "5h";
+    }
+
+    #[test]
+    fn note_string_tap_hold_each1() {
+        let input = "6/7h[4:3]";
+    }
+    #[test]
+    fn note_string_tap_hold_each2() {
+        let input = "8h[8:2]/3";
+    }
+
+    // #[test]
+    // fn note_string_slide_festival1() {
+    // let input = "7-4-1-6-3-8[4:4]"
+    // }
 }
