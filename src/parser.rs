@@ -84,8 +84,8 @@ impl TimingState {
     fn beat_duration_ms(&self) -> f64 {
         // let the BPM value is B and the length divider is T,
         // per-comma length = 240 / B / T (seconds)
-        // 240.0 / 10.0 * 1000.0 = 2400.0, as it is bpm10 and ms
-        2400.0 / self.bpm10 as f64 / self.divider
+        // 240.0 * 10.0 * 1000.0 = 2400000.0, as it is bpm10 and ms
+        2400000.0 / self.bpm10 as f64 / self.divider
     }
 
     fn advance(&mut self) {
@@ -163,8 +163,6 @@ fn parse_simai_tokens(input: &str) -> IResult<&str, Vec<SimaiToken<'_>>> {
         }
     }
 
-    println!("{}", input);
-    println!("{:?}", tokens);
     Ok((rest, tokens))
 }
 
@@ -355,7 +353,6 @@ fn parse_single_note(input: &str, starting_pos: Pos) -> IResult<&str, Note> {
 //                                                 we use a vector here in case the string represent an each
 //                                                 or multiple slides
 fn parse_note_string(input: &str) -> IResult<&str, Vec<Note>> {
-    println!("{}", input);
     let mut rtn = Vec::new();
 
     // first split by '/' and then by '*'
@@ -385,7 +382,7 @@ fn parse_raw_chart(input: &str) -> IResult<&str, (Vec<BpmRecord>, Vec<Note>)> {
                 if state.bpm10 != bpm10 {
                     state.bpm10_list.push(BpmRecord {
                         bpm10,
-                        timestamp_ms: state.curr_time_ms as _,
+                        change_timestamp_ms: state.curr_time_ms as _,
                     });
                     state.bpm10 = bpm10;
                 }

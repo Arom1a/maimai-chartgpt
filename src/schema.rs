@@ -158,7 +158,7 @@ pub struct Chart {
 #[derive(Debug)]
 pub struct BpmRecord {
     pub bpm10: u32,
-    pub timestamp_ms: u64,
+    pub change_timestamp_ms: u64,
 }
 
 #[derive(Debug)]
