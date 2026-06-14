@@ -8,5 +8,5 @@ fn main() {
     // }
 
     let file = fs::read_to_string("tests/test-files/cryptarithm.txt").unwrap();
-    let parsed = parse_entire_file(&file).unwrap();
+    parse_entire_file(&file).unwrap();
 }

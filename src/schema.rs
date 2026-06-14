@@ -126,27 +126,22 @@ pub enum SlideDeco {
 #[derive(Debug, PartialEq)]
 pub enum DurationExpr {
     DividerMultiplier(f64, u32),
-    // omitted as not present in my dataset
-    // AbsoluteMs(f64),
-    BpmDM(u32, f64, u32),
-}
-
-#[derive(Debug, PartialEq)]
-pub struct UnresolvedNote {
-    pub kind: NoteKind,
-    pub pos: Pos,
-    pub deco: BTreeSet<NoteDecoration>,
-    pub duration_expr: Option<DurationExpr>,
-    pub slide_segments: Vec<SlideSegment>,
-    pub slide_deco: BTreeSet<SlideDeco>,
+    AbsoluteMs(f64),
+    // we will process this to AbsoluteMs automatically
+    // Bpm10OverideDividerMultiplier {
+    //     bpm10: u32,
+    //     divider: f64,
+    //     multiplier: u32,
+    // },
 }
 
 #[derive(Debug, PartialEq)]
 pub struct Note {
-    pub timestamp: u64,
+    pub timestamp_ms: u64,
     pub kind: NoteKind,
     pub pos: Pos,
     pub deco: BTreeSet<NoteDecoration>,
+    pub wait: Option<DurationExpr>,
     pub duration: Option<DurationExpr>,
     pub slide_segments: Vec<SlideSegment>,
     pub slide_deco: BTreeSet<SlideDeco>,
@@ -161,7 +156,7 @@ pub struct Chart {
 
 pub struct BpmRecord {
     pub bpm10: u32,
-    pub timestamp: u64,
+    pub timestamp_ms: u64,
 }
 
 pub enum Cabinet {

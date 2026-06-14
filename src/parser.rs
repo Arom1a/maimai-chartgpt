@@ -16,6 +16,10 @@ pub enum FileItem<'a> {
     ChartSection { level: u8, raw: &'a str },
 }
 
+fn parse_float1(input: &str) -> IResult<&str, &str> {
+    take_while1(|c: char| c.is_digit(10) || c == '.').parse(input)
+}
+
 fn parse_metadata_line(input: &str) -> IResult<&str, FileItem<'_>> {
     let start = char('&');
     let key = take_until("=");
@@ -91,20 +95,16 @@ impl TimingState {
 
 fn parse_segment(input: &str) -> IResult<&str, Vec<SimaiToken<'_>>> {
     fn parse_bpm10(input: &str) -> IResult<&str, SimaiToken<'_>> {
-        map_res(
-            delimited(char('('), take_while1(|c: char| c.is_digit(10)), char(')')),
-            |s: &str| {
-                s.parse()
-                    .map(|bpm: f32| SimaiToken::Bpm10Change((bpm * 10.0) as u32))
-            },
-        )
+        map_res(delimited(char('('), parse_float1, char(')')), |s: &str| {
+            s.parse()
+                .map(|bpm: f32| SimaiToken::Bpm10Change((bpm * 10.0) as u32))
+        })
         .parse(input)
     }
     fn parse_divider(input: &str) -> IResult<&str, SimaiToken<'_>> {
-        map_res(
-            delimited(char('{'), take_while1(|c: char| c.is_digit(10)), char('}')),
-            |s: &str| s.parse().map(SimaiToken::DividerChange),
-        )
+        map_res(delimited(char('{'), parse_float1, char('}')), |s: &str| {
+            s.parse().map(SimaiToken::DividerChange)
+        })
         .parse(input)
     }
     fn parse_note_or_empty(input: &str) -> IResult<&str, SimaiToken<'_>> {
@@ -240,15 +240,55 @@ fn parse_slide_decoration(input: &str) -> IResult<&str, BTreeSet<SlideDeco>> {
     Ok((rest, decos.into_iter().collect()))
 }
 
-fn parse_duration_expression(input: &str) -> IResult<&str, DurationExpr> {
-    todo!()
+fn parse_duration_expression(
+    input: &str,
+) -> IResult<&str, (Option<DurationExpr>, Option<DurationExpr>)> {
+    fn parse_inner_string(
+        input: &str,
+    ) -> IResult<&str, (Option<DurationExpr>, Option<DurationExpr>)> {
+        let opt_wait_override = opt(terminated(parse_float1, tag("##")));
+        let opt_bpm_override = opt(terminated(parse_float1, char('#')));
+        let div_mul = map(
+            (parse_float1, char(':'), parse_float1),
+            |(div_s, _, mul_s)| {
+                let div: f64 = div_s.parse().unwrap();
+                let mul: u32 = mul_s.parse().unwrap();
+                DurationExpr::DividerMultiplier(div, mul)
+            },
+        );
+        let abs = map(parse_float1, |s: &str| {
+            DurationExpr::AbsoluteMs(s.parse::<f64>().unwrap() * 1000.0)
+        });
+        let div_mul_or_abs = alt((div_mul, abs));
+
+        let (rest, (wait, bpm, dur_expr)) =
+            (opt_wait_override, opt_bpm_override, div_mul_or_abs).parse(input)?;
+
+        let wait = wait.map(|s| DurationExpr::AbsoluteMs(s.parse::<f64>().unwrap() * 1000.0));
+
+        if let Some(bpm_s) = bpm
+            && let DurationExpr::DividerMultiplier(div, mul) = dur_expr
+        {
+            let bpm: f64 = bpm_s.parse().unwrap();
+            let ms = 240.0 / bpm / div * mul as f64 * 1000.0;
+            Ok((rest, (wait, Some(DurationExpr::AbsoluteMs(ms)))))
+        } else {
+            Ok((rest, (wait, Some(dur_expr))))
+        }
+    }
+
+    let (rest, rtn) = delimited(char('['), parse_inner_string, char(']')).parse(input)?;
+
+    Ok((rest, rtn))
 }
 
-fn parse_single_note(input: &str, starting_pos: Pos) -> IResult<&str, UnresolvedNote> {
+fn parse_single_note(input: &str, starting_pos: Pos) -> IResult<&str, Note> {
     let (rest, (deco, is_hold)) = parse_decoration_and_hold(input)?;
 
+    // found h, so this note is a hold
     if is_hold {
-        let (rest, dur_expr) = parse_duration_expression(rest)?;
+        let (rest, (wait, dur_expr)) = parse_duration_expression(rest)?;
+        assert!(wait.is_none());
         let kind = if starting_pos.is_button() {
             NoteKind::Hold
         } else {
@@ -256,35 +296,41 @@ fn parse_single_note(input: &str, starting_pos: Pos) -> IResult<&str, Unresolved
         };
         return Ok((
             rest,
-            UnresolvedNote {
+            Note {
+                timestamp_ms: 0,
                 kind,
                 pos: starting_pos,
                 deco,
-                duration_expr: Some(dur_expr),
+                wait,
+                duration: dur_expr,
                 slide_segments: vec![],
                 slide_deco: BTreeSet::new(),
             },
         ));
     }
 
+    // found slide shape chars, so this note is a slide
     if let Ok((rest, slide_segments)) = parse_slide_chain(rest) {
         let (rest, mut slide_deco) = parse_slide_decoration(rest)?;
-        let (rest, duration_expr) = parse_duration_expression.parse(rest)?;
+        let (rest, (wait, duration)) = parse_duration_expression(rest)?;
         let (rest, slide_deco_back) = parse_slide_decoration(rest)?;
         slide_deco.extend(slide_deco_back.into_iter());
         return Ok((
             rest,
-            UnresolvedNote {
+            Note {
+                timestamp_ms: 0,
                 kind: NoteKind::Slide,
                 pos: starting_pos,
                 deco,
-                duration_expr: Some(duration_expr),
+                wait,
+                duration,
                 slide_segments,
                 slide_deco,
             },
         ));
     }
 
+    // not found anything special, so this note is either a tap or touch
     let kind = if starting_pos.is_button() {
         NoteKind::Tap
     } else {
@@ -292,11 +338,13 @@ fn parse_single_note(input: &str, starting_pos: Pos) -> IResult<&str, Unresolved
     };
     Ok((
         rest,
-        UnresolvedNote {
+        Note {
+            timestamp_ms: 0,
             kind,
             pos: starting_pos,
             deco,
-            duration_expr: None,
+            wait: None,
+            duration: None,
             slide_segments: vec![],
             slide_deco: BTreeSet::new(),
         },
@@ -305,7 +353,7 @@ fn parse_single_note(input: &str, starting_pos: Pos) -> IResult<&str, Unresolved
 
 //                                                 we use a vector here in case the string represent an each
 //                                                 or multiple slides
-fn parse_note_string(input: &str) -> IResult<&str, Vec<UnresolvedNote>> {
+fn parse_note_string(input: &str) -> IResult<&str, Vec<Note>> {
     println!("{}", input);
     let mut rtn = Vec::new();
 
@@ -336,7 +384,7 @@ fn parse_raw_chart(input: &str) -> IResult<&str, (Vec<BpmRecord>, Vec<Note>)> {
                 if state.bpm10 != bpm10 {
                     state.bpm10_list.push(BpmRecord {
                         bpm10,
-                        timestamp: state.curr_time_ms as _,
+                        timestamp_ms: state.curr_time_ms as _,
                     });
                     state.bpm10 = bpm10;
                 }
@@ -350,20 +398,11 @@ fn parse_raw_chart(input: &str) -> IResult<&str, (Vec<BpmRecord>, Vec<Note>)> {
             }
             SimaiToken::Empty => {}
             SimaiToken::Note(note_string) => {
-                let (_, parsed_notes) = parse_note_string(note_string)?;
-                let mut resolved_notes = parsed_notes
-                    .into_iter()
-                    .map(|note| Note {
-                        timestamp: state.curr_time_ms as _,
-                        kind: note.kind,
-                        pos: note.pos,
-                        deco: note.deco,
-                        duration: note.duration_expr,
-                        slide_segments: note.slide_segments,
-                        slide_deco: note.slide_deco,
-                    })
-                    .collect();
-                notes.append(&mut resolved_notes);
+                let (_, mut parsed_notes) = parse_note_string(note_string)?;
+                for note in &mut parsed_notes {
+                    note.timestamp_ms = state.curr_time_ms as _;
+                }
+                notes.append(&mut parsed_notes);
             }
             SimaiToken::End => {
                 break;
@@ -405,7 +444,7 @@ pub fn parse_entire_file(input: &str) -> Result<ProcessedFile, nom::Err<nom::err
         let des_key = format!("des_{}", level);
         let designer = headers.get(des_key.as_str()).unwrap().to_string();
 
-        let (rest, (bpm10_list, notes)) = parse_raw_chart(raw)?;
+        let (_rest, (bpm10_list, notes)) = parse_raw_chart(raw)?;
 
         all_charts.push(Chart {
             constant,
@@ -433,10 +472,11 @@ mod tests {
         let input = "1";
         let (rest, output) = parse_note_string(input).unwrap();
         let note = Note {
-            timestamp: 0,
+            timestamp_ms: 0,
             kind: NoteKind::Tap,
             pos: Pos::Btn1,
             deco: BTreeSet::new(),
+            wait: None,
             duration: None,
             slide_segments: Vec::new(),
             slide_deco: BTreeSet::new(),
