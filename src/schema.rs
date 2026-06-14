@@ -84,11 +84,12 @@ impl TryFrom<(Option<char>, char)> for Pos {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum NoteDecoration {
     Break,
     Ex,
-    PseudoEach,
+    // omitted as not present in my dataset
+    // PseudoEach,
     Firework,
 }
 
@@ -96,8 +97,8 @@ pub enum NoteDecoration {
 pub enum SlideShape {
     Straight,     // -
     ArcLeft,      // <, do not use ^, auto convert to left/right
+    Center,       // v, furthermore, ^ is not present in my dataset
     ArcRight,     // >
-    Center,       // v
     ZigzagS,      // s
     ZigzagZ,      // z
     P,            // TODO
@@ -114,7 +115,7 @@ pub struct SlideSegment {
     pub end: Pos,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum SlideDeco {
     Break,
     // omitted as not present in normal charts
@@ -127,13 +128,7 @@ pub enum DurationExpr {
     DividerMultiplier(f64, u32),
     // omitted as not present in my dataset
     // AbsoluteMs(f64),
-    // BpmDM(u32, f64, u32),
-}
-
-impl DurationExpr {
-    pub fn resolve_ms(&self, bpm: u32) -> u64 {
-        todo!()
-    }
+    BpmDM(u32, f64, u32),
 }
 
 #[derive(Debug, PartialEq)]
@@ -152,7 +147,7 @@ pub struct Note {
     pub kind: NoteKind,
     pub pos: Pos,
     pub deco: BTreeSet<NoteDecoration>,
-    pub duration: Option<u64>,
+    pub duration: Option<DurationExpr>,
     pub slide_segments: Vec<SlideSegment>,
     pub slide_deco: BTreeSet<SlideDeco>,
 }
@@ -160,12 +155,12 @@ pub struct Note {
 pub struct Chart {
     pub constant: (u8, u8), // major, minor
     pub designer: String,
-    pub bpm_list: Vec<BpmRecord>,
+    pub bpm10_list: Vec<BpmRecord>,
     pub notes: Vec<Note>,
 }
 
 pub struct BpmRecord {
-    pub bpm: u32,
+    pub bpm10: u32,
     pub timestamp: u64,
 }
 
@@ -183,7 +178,7 @@ pub struct ProcessedFile {
 
 #[derive(Debug)]
 pub enum SimaiToken<'a> {
-    BpmChange(u32),
+    Bpm10Change(u32),
     DividerChange(f64),
     Empty,
     Note(&'a str),
