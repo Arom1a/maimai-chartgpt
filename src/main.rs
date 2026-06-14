@@ -8,5 +8,6 @@ fn main() {
     // }
 
     let file = fs::read_to_string("tests/test-files/cryptarithm.txt").unwrap();
-    parse_entire_file(&file).unwrap();
+    let processed_file = parse_entire_file(&file).unwrap();
+    println!("{:#?}", processed_file);
 }

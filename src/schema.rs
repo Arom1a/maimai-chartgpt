@@ -147,6 +147,7 @@ pub struct Note {
     pub slide_deco: BTreeSet<SlideDeco>,
 }
 
+#[derive(Debug)]
 pub struct Chart {
     pub constant: (u8, u8), // major, minor
     pub designer: String,
@@ -154,16 +155,19 @@ pub struct Chart {
     pub notes: Vec<Note>,
 }
 
+#[derive(Debug)]
 pub struct BpmRecord {
     pub bpm10: u32,
     pub timestamp_ms: u64,
 }
 
+#[derive(Debug)]
 pub enum Cabinet {
     SD,
     DX,
 }
 
+#[derive(Debug)]
 pub struct ProcessedFile {
     pub title: String,
     pub cabinet: Cabinet,

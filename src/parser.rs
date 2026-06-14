@@ -222,6 +222,7 @@ fn parse_slide_chain(input: &str) -> IResult<&str, Vec<SlideSegment>> {
             }),
             map(char('p'), |_| SlideShape::P),
             map(char('q'), |_| SlideShape::Q),
+            map(char('w'), |_| SlideShape::Wifi),
         ))
         .parse(input)
     }
