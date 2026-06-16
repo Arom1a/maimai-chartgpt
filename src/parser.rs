@@ -11,7 +11,7 @@ use nom::{
 use std::collections::{BTreeSet, HashMap};
 
 #[derive(Debug)]
-pub enum FileItem<'a> {
+enum FileItem<'a> {
     Metadata(&'a str, &'a str),
     ChartSection { level: u8, raw: &'a str },
 }
@@ -50,7 +50,7 @@ fn parse_inote_raw(input: &str) -> IResult<&str, FileItem<'_>> {
     Ok((input, FileItem::ChartSection { level, raw }))
 }
 
-pub fn parse_file_items(input: &str) -> IResult<&str, Vec<FileItem<'_>>> {
+fn parse_file_items(input: &str) -> IResult<&str, Vec<FileItem<'_>>> {
     many0(preceded(
         multispace0,
         alt((parse_inote_raw, parse_metadata_line)),
@@ -67,7 +67,7 @@ fn parse_constant(s: &str) -> (u8, u8) {
 
 struct TimingState {
     bpm10: u32,
-    divider: f64,
+    divider: u32,
     curr_time_ms: f64,
     bpm10_list: Vec<BpmRecord>,
 }
@@ -75,7 +75,7 @@ impl TimingState {
     fn new() -> Self {
         Self {
             bpm10: 0,
-            divider: 1.0,
+            divider: 0,
             curr_time_ms: 0.0,
             bpm10_list: Vec::new(),
         }
@@ -85,7 +85,7 @@ impl TimingState {
         // let the BPM value is B and the length divider is T,
         // per-comma length = 240 / B / T (seconds)
         // 240.0 * 10.0 * 1000.0 = 2400000.0, as it is bpm10 and ms
-        2400000.0 / self.bpm10 as f64 / self.divider
+        2400000.0 / self.bpm10 as f64 / self.divider as f64
     }
 
     fn advance(&mut self) {
@@ -251,6 +251,8 @@ fn parse_duration_expression(
             (parse_float1, char(':'), parse_float1),
             |(div_s, _, mul_s)| {
                 let div: f64 = div_s.parse().unwrap();
+                debug_assert!(format!("{:?}", div).ends_with('0'));
+                let div: u32 = div as u32;
                 let mul: u32 = mul_s.parse().unwrap();
                 DurationExpr::DividerMultiplier(div, mul)
             },
@@ -269,7 +271,7 @@ fn parse_duration_expression(
             && let DurationExpr::DividerMultiplier(div, mul) = dur_expr
         {
             let bpm: f64 = bpm_s.parse().unwrap();
-            let ms = 240.0 / bpm / div * mul as f64 * 1000.0;
+            let ms = 240.0 / bpm / div as f64 * mul as f64 * 1000.0;
             Ok((rest, (wait, Some(DurationExpr::AbsoluteMs(ms)))))
         } else {
             Ok((rest, (wait, Some(dur_expr))))
@@ -287,7 +289,7 @@ fn parse_single_note(input: &str, starting_pos: Pos) -> IResult<&str, Note> {
     // found h, so this note is a hold
     if is_hold {
         let (rest, (wait, dur_expr)) = parse_duration_expression(rest)?;
-        assert!(wait.is_none());
+        debug_assert!(wait.is_none());
         let kind = if starting_pos.is_button() {
             NoteKind::Hold
         } else {
@@ -390,7 +392,8 @@ fn parse_raw_chart(input: &str) -> IResult<&str, (Vec<BpmRecord>, Vec<Note>)> {
                 continue;
             }
             SimaiToken::DividerChange(divider) => {
-                state.divider = divider;
+                debug_assert!(format!("{:?}", divider).ends_with('0'), "{:2?}", divider);
+                state.divider = divider as u32;
                 // continue for the same reason
                 continue;
             }
@@ -432,7 +435,7 @@ pub fn parse_entire_file(input: &str) -> Result<ProcessedFile, nom::Err<nom::err
         _ => panic!(),
     };
     let version = headers.get("version").unwrap().to_string();
-    assert!(headers.get("first").is_none()); // not present in my dataset, so assert here for future reference
+    debug_assert!(headers.get("first").is_none()); // not present in my dataset, so assert here for future reference
 
     let mut all_charts = Vec::new();
 

@@ -125,7 +125,7 @@ pub enum SlideDeco {
 
 #[derive(Debug, PartialEq)]
 pub enum DurationExpr {
-    DividerMultiplier(f64, u32),
+    DividerMultiplier(u32, u32),
     AbsoluteMs(f64),
     // we will process this to AbsoluteMs automatically
     // Bpm10OverideDividerMultiplier {
