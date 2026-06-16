@@ -1,13 +1,37 @@
 use data_preprocess::parser::parse_entire_file;
 use std::fs;
+use std::path::Path;
 
 fn main() {
-    // for file in "./dataset/*/*/maidata.txt".chars() {
-    //     let output = "processed.txt";
-    //     println!("Pre-processing {}", file);
-    // }
+    let dataset_dir = Path::new("./dataset");
+    let mut processed_cnt = 0;
 
-    let file = fs::read_to_string("tests/test-files/cryptarithm.txt").unwrap();
-    let processed_file = parse_entire_file(&file).unwrap();
-    println!("{:#?}", processed_file);
+    for version in fs::read_dir(dataset_dir).unwrap().flatten() {
+        let version_path = version.path();
+        if !version_path.is_dir() {
+            continue;
+        }
+        for sub_version in fs::read_dir(version_path).unwrap().flatten() {
+            let sub_version_path = sub_version.path();
+            if !sub_version_path.is_dir() {
+                continue;
+            }
+            for id in fs::read_dir(sub_version_path).unwrap().flatten() {
+                let id_path = id.path();
+                if !id_path.is_dir() {
+                    continue;
+                }
+                let file = id_path.join("maidata.txt");
+                println!("Processing {}", file.to_string_lossy());
+                let content = fs::read_to_string(&file).unwrap();
+                let processed = parse_entire_file(&content).unwrap();
+                processed_cnt += 1;
+                let output = file.with_file_name("processed.json");
+                let processed_json = serde_json::to_string_pretty(&processed).unwrap();
+                fs::write(output, processed_json).unwrap();
+            }
+        }
+    }
+
+    println!("Successfully processed {} files", processed_cnt);
 }

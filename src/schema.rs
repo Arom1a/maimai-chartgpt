@@ -1,6 +1,7 @@
+use serde::Serialize;
 use std::collections::BTreeSet;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Serialize)]
 pub enum NoteKind {
     Tap,
     Hold,
@@ -10,7 +11,7 @@ pub enum NoteKind {
 }
 
 #[rustfmt::skip]
-#[derive(Debug, PartialEq, Clone, Copy)]
+#[derive(Debug, PartialEq, Clone, Copy, Serialize)]
 pub enum Pos {
     // button 1-8
     Btn1, Btn2, Btn3, Btn4, Btn5, Btn6, Btn7, Btn8,
@@ -84,7 +85,7 @@ impl TryFrom<(Option<char>, char)> for Pos {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub enum NoteDecoration {
     Break,
     Ex,
@@ -93,7 +94,7 @@ pub enum NoteDecoration {
     Firework,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Serialize)]
 pub enum SlideShape {
     Straight,     // -
     ArcLeft,      // <, do not use ^, auto convert to left/right
@@ -109,13 +110,13 @@ pub enum SlideShape {
     Wifi,         // w
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Serialize)]
 pub struct SlideSegment {
     pub shape: SlideShape,
     pub end: Pos,
 }
 
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub enum SlideDeco {
     Break,
     // omitted as not present in normal charts
@@ -123,7 +124,7 @@ pub enum SlideDeco {
     // StarVisible
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Serialize)]
 pub enum DurationExpr {
     DividerMultiplier(u32, u32),
     AbsoluteMs(f64),
@@ -135,7 +136,7 @@ pub enum DurationExpr {
     // },
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Serialize)]
 pub struct Note {
     pub timestamp_ms: u64,
     pub kind: NoteKind,
@@ -147,7 +148,7 @@ pub struct Note {
     pub slide_deco: BTreeSet<SlideDeco>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct Chart {
     pub constant: (u8, u8), // major, minor
     pub designer: String,
@@ -155,19 +156,19 @@ pub struct Chart {
     pub notes: Vec<Note>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct BpmRecord {
     pub bpm10: u32,
     pub change_timestamp_ms: u64,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub enum Cabinet {
     SD,
     DX,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct ProcessedFile {
     pub title: String,
     pub cabinet: Cabinet,
