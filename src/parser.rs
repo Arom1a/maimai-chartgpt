@@ -1,3 +1,5 @@
+// TODO: replace all asserts and unwraps with proper error handling
+
 use crate::schema::*;
 use nom::{
     IResult, Parser,
@@ -361,10 +363,12 @@ fn parse_note_string(input: &str) -> IResult<&str, Vec<Note>> {
     for sub_str in input.split('/') {
         let (rest, starting_pos) = parse_starting_pos(sub_str)?;
 
+        let is_slide_chain = rest.find('*').is_some();
         for sub_note in rest.split('*') {
             // then parse each part
             let (_, note) =
                 all_consuming(|s| parse_single_note(s, starting_pos)).parse(sub_note)?;
+            assert!(!is_slide_chain || note.kind == NoteKind::Slide);
             rtn.push(note);
         }
     }
@@ -416,7 +420,7 @@ fn parse_raw_chart(input: &str) -> IResult<&str, (Vec<BpmRecord>, Vec<Note>)> {
 }
 
 pub fn parse_entire_file(input: &str) -> Result<ProcessedFile, nom::Err<nom::error::Error<&str>>> {
-    let (_, items) = parse_file_items(input)?;
+    let (_, items) = all_consuming(terminated(parse_file_items, multispace0)).parse(input)?;
     let mut headers = HashMap::new();
     let mut chart_sections = Vec::new();
     for item in items {
@@ -483,7 +487,7 @@ mod tests {
             slide_deco: BTreeSet::new(),
         };
         assert!(rest.is_empty());
-        // assert_eq!(output, vec![note]);
+        assert_eq!(output, vec![note]);
     }
     #[test]
     fn note_string_tap2() {
@@ -521,6 +525,13 @@ mod tests {
     #[test]
     fn note_string_tap_hold_each2() {
         let input = "8h[8:2]/3";
+    }
+
+    #[test]
+    #[should_panic]
+    fn note_string_empty() {
+        let input = "8**";
+        assert!(parse_note_string(input).is_err());
     }
 
     // #[test]
