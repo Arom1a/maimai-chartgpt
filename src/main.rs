@@ -1,4 +1,4 @@
-use data_preprocess::parser::parse_entire_file;
+use data_preprocess::parser::{ProcessError, parse_entire_file};
 use std::fs;
 use std::path::Path;
 
@@ -24,7 +24,14 @@ fn main() {
                 let file = id_path.join("maidata.txt");
                 println!("Processing {}", file.to_string_lossy());
                 let content = fs::read_to_string(&file).unwrap();
-                let processed = parse_entire_file(&content).unwrap();
+                let processed = match parse_entire_file(&content) {
+                    Ok(ok) => ok,
+                    Err(ProcessError::Utage) => continue,
+                    Err(ProcessError::Nom(e)) => {
+                        eprint!("Parse error: {}", e);
+                        panic!();
+                    }
+                };
                 processed_cnt += 1;
                 let output = file.with_file_name("processed.json");
                 let processed_json = serde_json::to_string_pretty(&processed).unwrap();

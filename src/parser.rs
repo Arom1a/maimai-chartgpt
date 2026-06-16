@@ -419,7 +419,17 @@ fn parse_raw_chart(input: &str) -> IResult<&str, (Vec<BpmRecord>, Vec<Note>)> {
     Ok((rest, (state.bpm10_list, notes)))
 }
 
-pub fn parse_entire_file(input: &str) -> Result<ProcessedFile, nom::Err<nom::error::Error<&str>>> {
+pub enum ProcessError {
+    Utage,
+    Nom(String),
+}
+impl From<nom::Err<nom::error::Error<&str>>> for ProcessError {
+    fn from(e: nom::Err<nom::error::Error<&str>>) -> Self {
+        ProcessError::Nom(e.to_string())
+    }
+}
+
+pub fn parse_entire_file(input: &str) -> Result<ProcessedFile, ProcessError> {
     let (_, items) = all_consuming(terminated(parse_file_items, multispace0)).parse(input)?;
     let mut headers = HashMap::new();
     let mut chart_sections = Vec::new();
@@ -440,6 +450,11 @@ pub fn parse_entire_file(input: &str) -> Result<ProcessedFile, nom::Err<nom::err
     };
     let version = headers.get("version").unwrap().to_string();
     debug_assert!(headers.get("first").is_none()); // not present in my dataset, so assert here for future reference
+    if let Some(&genre) = headers.get("genre") {
+        if genre == "宴会場" {
+            return Err(ProcessError::Utage);
+        }
+    }
 
     let mut all_charts = Vec::new();
 
@@ -447,7 +462,11 @@ pub fn parse_entire_file(input: &str) -> Result<ProcessedFile, nom::Err<nom::err
         let lv_key = format!("lv_{}", level);
         let constant = parse_constant(&headers.get(lv_key.as_str()).unwrap());
         let des_key = format!("des_{}", level);
-        let designer = headers.get(des_key.as_str()).unwrap().to_string();
+        let designer = headers
+            .get(des_key.as_str())
+            .or_else(|| headers.get("des"))
+            .unwrap_or(&"")
+            .to_string();
 
         let (_rest, (bpm10_list, notes)) = parse_raw_chart(raw)?;
 
