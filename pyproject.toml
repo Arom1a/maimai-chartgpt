@@ -6,6 +6,10 @@ readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
     "bidict>=0.23.1",
+    "librosa>=0.11.0",
     "numpy>=2.4.6",
     "torch>=2.12.0",
+    "torchaudio>=2.11.0",
+    "torchcodec>=0.14.0",
+    "tqdm>=4.68.3",
 ]

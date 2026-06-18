@@ -465,6 +465,12 @@ class ChartTokenizer:
 
         return notes
 
+    @staticmethod
+    def _decode_notes_standalone(tokens: List[int]) -> List[Dict]:
+        """Decode tokens without requiring a BPM list (for val logging)."""
+        dummy = ChartTokenizer([{"bpm10": 1500, "change_timestamp_ms": 0}])
+        return dummy.decode_tokens(tokens)
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Tests
