@@ -19,9 +19,9 @@ KIND_TOKENS: Dict[str, int] = {
     "Touch": 7,
     "TouchHold": 8,
 }
-KIND_INV: Dict[int, str] = {v: k for k, v in KIND_TOKENS.items()}
 
 # ── Position tokens (41 positions) ────────────────────────────────────────────
+# fmt: off
 POSITIONS: List[str] = [
     "Btn1", "Btn2", "Btn3", "Btn4", "Btn5", "Btn6", "Btn7", "Btn8",
     "A1", "A2", "A3", "A4", "A5", "A6", "A7", "A8",
@@ -30,24 +30,26 @@ POSITIONS: List[str] = [
     "D1", "D2", "D3", "D4", "D5", "D6", "D7", "D8",
     "E1", "E2", "E3", "E4", "E5", "E6", "E7", "E8",
 ]
+# fmt: on
 POS_BASE = 9
 POS_TO_ID: Dict[str, int] = {p: POS_BASE + i for i, p in enumerate(POSITIONS)}
-ID_TO_POS: Dict[int, str] = {v: k for k, v in POS_TO_ID.items()}
 
 # ── Note decoration tokens ────────────────────────────────────────────────────
 DECO_NONE = 50
 DECO_BREAK = 51
 DECO_EX = 52
 DECO_FIREWORK = 53
-DECO_NAMES: Dict[str, int] = {"Break": DECO_BREAK, "Ex": DECO_EX, "Firework": DECO_FIREWORK}
-DECO_INV: Dict[int, str] = {v: k for k, v in DECO_NAMES.items()}
+DECO_NAMES: Dict[str, int] = {
+    "Break": DECO_BREAK,
+    "Ex": DECO_EX,
+    "Firework": DECO_FIREWORK,
+}
 DECO_SORT_ORDER = ["Break", "Ex", "Firework"]
 
 # ── Slide decoration tokens ───────────────────────────────────────────────────
 SLIDE_DECO_NONE = 54
 SLIDE_DECO_BREAK = 55
 SLIDE_DECO_NAMES: Dict[str, int] = {"Break": SLIDE_DECO_BREAK}
-SLIDE_DECO_INV: Dict[int, str] = {v: k for k, v in SLIDE_DECO_NAMES.items()}
 
 # ── Duration type markers ─────────────────────────────────────────────────────
 DUR_ABS = 56
@@ -79,7 +81,6 @@ SHAPES: Dict[str, int] = {
     "Reflect": 73,
     "Wifi": 74,
 }
-SHAPE_INV: Dict[int, str] = {v: k for k, v in SHAPES.items()}
 
 # ── Time offset encoding ──────────────────────────────────────────────────────
 TIME_OFFSET_BASE = 75
@@ -102,11 +103,9 @@ _TOKEN_NAMES: Dict[str, int] = {
     **{f"KIND_{k}": v for k, v in KIND_TOKENS.items()},
     **{f"POS_{p}": i for p, i in POS_TO_ID.items()},
     "DECO_NONE": DECO_NONE,
-    "DECO_BREAK": DECO_BREAK,
-    "DECO_EX": DECO_EX,
-    "DECO_FIREWORK": DECO_FIREWORK,
+    **{f"DECO_{k}": v for k, v in DECO_NAMES.items()},
     "SLIDE_DECO_NONE": SLIDE_DECO_NONE,
-    "SLIDE_DECO_BREAK": SLIDE_DECO_BREAK,
+    **{f"SLIDE_DECO_{k}": v for k, v in SLIDE_DECO_NAMES.items()},
     "DUR_ABS": DUR_ABS,
     "DUR_SYM": DUR_SYM,
     "DIV": DIV,
@@ -119,6 +118,11 @@ _TOKEN_NAMES: Dict[str, int] = {
 
 # Build the bidirectional mapping
 TOKEN_BIDICT = frozenbidict(_TOKEN_NAMES)
+
+
+def _inv_name(token_id: int, prefix: str) -> str:
+    """Look up *token_id* in ``TOKEN_BIDICT.inv`` and strip *prefix*."""
+    return TOKEN_BIDICT.inv[token_id].removeprefix(prefix)
 
 
 def is_time_token(token_id: int) -> bool:
@@ -153,7 +157,7 @@ def encode_value_token(value: int) -> int:
 # ChartTokenizer
 # ═══════════════════════════════════════════════════════════════════════════════
 
-_BEAT_MS_FACTOR = 600000.0   # 60000 * 10 (bpm10 = bpm * 10)
+_BEAT_MS_FACTOR = 600000.0  # 60000 * 10 (bpm10 = bpm * 10)
 _MEASURE_MS_FACTOR = 2400000.0  # full measure: 4 * 60000 * 10
 
 
@@ -231,18 +235,24 @@ class ChartTokenizer:
         elif marker == DUR_SYM:
             # expect DIV, value, MUL, value
             if tokens[pos] != DIV:
-                raise ValueError(f"Expected DIV token at position {pos}, got {tokens[pos]}")
+                raise ValueError(
+                    f"Expected DIV token at position {pos}, got {tokens[pos]}"
+                )
             pos += 1
             div = decode_value_token(tokens[pos])
             pos += 1
             if tokens[pos] != MUL:
-                raise ValueError(f"Expected MUL token at position {pos}, got {tokens[pos]}")
+                raise ValueError(
+                    f"Expected MUL token at position {pos}, got {tokens[pos]}"
+                )
             pos += 1
             mul = decode_value_token(tokens[pos])
             pos += 1
             return {"DividerMultiplier": [div, mul]}, pos
         else:
-            raise ValueError(f"Expected DUR_ABS or DUR_SYM at position {pos-1}, got {marker}")
+            raise ValueError(
+                f"Expected DUR_ABS or DUR_SYM at position {pos - 1}, got {marker}"
+            )
 
     # ── Encoding ───────────────────────────────────────────────────────────
 
@@ -367,17 +377,17 @@ class ChartTokenizer:
             pos += 1
 
             # 2. Kind
-            kind = KIND_INV[tokens[pos]]
+            kind = _inv_name(tokens[pos], "KIND_")
             pos += 1
 
             # 3. Position
-            note_pos = ID_TO_POS[tokens[pos]]
+            note_pos = _inv_name(tokens[pos], "POS_")
             pos += 1
 
             # 4. Note decorations
             decos: List[str] = []
             while tokens[pos] in (DECO_BREAK, DECO_EX, DECO_FIREWORK):
-                decos.append(DECO_INV[tokens[pos]])
+                decos.append(_inv_name(tokens[pos], "DECO_"))
                 pos += 1
             if tokens[pos] == DECO_NONE:
                 pos += 1
@@ -400,18 +410,18 @@ class ChartTokenizer:
             if kind == "Slide":
                 while tokens[pos] == SEG:
                     pos += 1
-                    shape = SHAPE_INV[tokens[pos]]
+                    shape = _inv_name(tokens[pos], "SHAPE_")
                     pos += 1
                     if shape == "Reflect":
-                        reflect_pos = ID_TO_POS[tokens[pos]]
+                        reflect_pos = _inv_name(tokens[pos], "POS_")
                         pos += 1
-                        end_pos = ID_TO_POS[tokens[pos]]
+                        end_pos = _inv_name(tokens[pos], "POS_")
                         pos += 1
                         slide_segments.append(
                             {"shape": {"Reflect": reflect_pos}, "end": end_pos}
                         )
                     else:
-                        end_pos = ID_TO_POS[tokens[pos]]
+                        end_pos = _inv_name(tokens[pos], "POS_")
                         pos += 1
                         slide_segments.append({"shape": shape, "end": end_pos})
                 # SEG_END
@@ -423,7 +433,7 @@ class ChartTokenizer:
 
                 # 8. Slide decorations
                 while tokens[pos] in (SLIDE_DECO_BREAK,):
-                    slide_deco.append(SLIDE_DECO_INV[tokens[pos]])
+                    slide_deco.append(_inv_name(tokens[pos], "SLIDE_DECO_"))
                     pos += 1
                 if tokens[pos] == SLIDE_DECO_NONE:
                     pos += 1
@@ -465,7 +475,9 @@ if __name__ == "__main__":
     import json
 
     print(f"Vocab size: {VOCAB_SIZE}")
-    print(f"Time offset range: {TIME_OFFSET_BASE} – {TIME_OFFSET_BASE + MAX_DELTA_BINS - 1}")
+    print(
+        f"Time offset range: {TIME_OFFSET_BASE} – {TIME_OFFSET_BASE + MAX_DELTA_BINS - 1}"
+    )
     print(f"Value range: {VALUE_BASE} – {VALUE_BASE + MAX_VALUE - 1}")
 
     def _quant_note(note: Dict) -> Dict:
@@ -476,9 +488,7 @@ if __name__ == "__main__":
                 round(n["duration"]["AbsoluteMs"] / 10.0) * 10
             )
         if isinstance(n.get("wait"), dict) and "AbsoluteMs" in n["wait"]:
-            n["wait"]["AbsoluteMs"] = float(
-                round(n["wait"]["AbsoluteMs"] / 10.0) * 10
-            )
+            n["wait"]["AbsoluteMs"] = float(round(n["wait"]["AbsoluteMs"] / 10.0) * 10)
         return n
 
     def _quant_notes(
@@ -672,7 +682,9 @@ if __name__ == "__main__":
     t_wait = tokenizer.encode_notes(notes_wait)
     assert WAIT in t_wait, f"WAIT token missing when explicit ≠ default: {t_wait}"
     n_wait = tokenizer.decode_tokens(t_wait)
-    assert n_wait == _quant_notes(notes_wait, tokenizer), f"Wait round-trip failed: {n_wait}"
+    assert n_wait == _quant_notes(notes_wait, tokenizer), (
+        f"Wait round-trip failed: {n_wait}"
+    )
     print("✓ Explicit wait test passed")
 
     # ── Test 7: wait equals default → no WAIT token ────────────────────────
