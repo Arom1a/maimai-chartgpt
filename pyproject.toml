@@ -5,6 +5,7 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
+    "bidict>=0.23.1",
     "numpy>=2.4.6",
     "torch>=2.12.0",
 ]

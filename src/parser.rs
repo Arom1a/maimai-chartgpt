@@ -511,39 +511,48 @@ mod tests {
     #[test]
     fn note_string_tap2() {
         let input = "8";
+        todo!()
     }
 
     #[test]
     fn note_string_each1() {
         let input = "1/8";
+        todo!()
     }
     #[test]
     fn note_string_each2() {
         let input = "7/3";
+        todo!()
     }
 
     #[test]
     fn note_string_hold1() {
         let input = "2h[8:5]";
+        todo!()
     }
     #[test]
     fn note_string_hold2() {
         let input = "4h[2:7]";
+        todo!()
     }
     fn note_string_hold3() {
         let input = "7h[4:0]";
+        todo!()
     }
     fn note_string_hold4() {
         let input = "5h";
+        todo!()
     }
 
     #[test]
     fn note_string_tap_hold_each1() {
         let input = "6/7h[4:3]";
+        todo!()
     }
     #[test]
     fn note_string_tap_hold_each2() {
         let input = "8h[8:2]/3";
+        todo!()
     }
 
     #[test]
@@ -553,8 +562,9 @@ mod tests {
         assert!(parse_note_string(input).is_err());
     }
 
-    // #[test]
-    // fn note_string_slide_festival1() {
-    // let input = "7-4-1-6-3-8[4:4]"
-    // }
+    #[test]
+    fn note_string_slide_festival1() {
+        let input = "7-4-1-6-3-8[4:4]";
+        todo!()
+    }
 }

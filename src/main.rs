@@ -42,3 +42,15 @@ fn main() {
 
     println!("Successfully processed {} files", processed_cnt);
 }
+
+fn remove_all_processed_json(dir: &Path) {
+    for entry in fs::read_dir(dir).unwrap().flatten() {
+        let path = entry.path();
+        let ft = entry.file_type().unwrap();
+        if ft.is_dir() {
+            remove_all_processed_json(&path);
+        } else if ft.is_file() && path.file_name().unwrap_or_default() == "processed.json" {
+            let _ = fs::remove_file(&path);
+        }
+    }
+}
