@@ -11,7 +11,7 @@ from typing import Dict, List, Optional, Tuple
 import torch
 import torch.nn as nn
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
+from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -49,6 +49,7 @@ class TrainConfig:
     lr: float = 1e-4
     weight_decay: float = 0.01
     warmup_steps: int = 1000
+    eta_min: float = 1e-5  # minimum LR for cosine schedule
     grad_clip: float = 1.0
     val_fraction: float = 0.1
 
@@ -214,8 +215,25 @@ def train(cfg: TrainConfig) -> None:
 
     # ── Optimiser & scheduler ────────────────────────────────────────────
     optimizer = AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
-    scheduler = CosineAnnealingWarmRestarts(optimizer, T_0=cfg.warmup_steps, T_mult=2)
     criterion = nn.CrossEntropyLoss(ignore_index=PAD)
+
+    # Linear warmup → cosine decay to eta_min over the rest of training.
+    # Total optimizer steps = batches_per_epoch // accumulation * epochs.
+    steps_per_epoch = len(dl_train) // cfg.gradient_accumulation_steps
+    total_steps = cfg.epochs * steps_per_epoch
+    warmup_scheduler = LinearLR(
+        optimizer, start_factor=1e-3, end_factor=1.0,
+        total_iters=cfg.warmup_steps,
+    )
+    cosine_scheduler = CosineAnnealingLR(
+        optimizer, T_max=total_steps - cfg.warmup_steps,
+        eta_min=cfg.eta_min,
+    )
+    scheduler = SequentialLR(
+        optimizer,
+        schedulers=[warmup_scheduler, cosine_scheduler],
+        milestones=[cfg.warmup_steps],
+    )
 
     # AMP scaler (CUDA only – no-op on CPU / MPS)
     use_amp = device.type == "cuda"
@@ -276,7 +294,7 @@ def train(cfg: TrainConfig) -> None:
             if (batch_idx + 1) % cfg.gradient_accumulation_steps == 0:
                 if use_amp:
                     scaler.unscale_(optimizer)
-                nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
+                grad_norm = nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip).item()
                 if use_amp:
                     scaler.step(optimizer)
                     scaler.update()
@@ -290,6 +308,7 @@ def train(cfg: TrainConfig) -> None:
                     pbar.set_postfix(
                         loss=f"{accum_loss:.3f}",
                         lr=f"{scheduler.get_last_lr()[0]:.2e}",
+                        gnorm=f"{grad_norm:.1f}",
                     )
                     accum_loss = 0.0
 
