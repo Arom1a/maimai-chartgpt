@@ -37,9 +37,9 @@ class TrainConfig:
 
     # Model
     d_model: int = 512
-    nhead: int = 8
-    num_decoder_layers: int = 6
-    dim_feedforward: int = 2048
+    nhead: int = 4
+    num_decoder_layers: int = 4
+    dim_feedforward: int = 1024
     dropout: float = 0.1
 
     # Training
@@ -60,6 +60,9 @@ class TrainConfig:
 
     # Device
     device: str = "cuda"
+
+    # Sequence filtering
+    max_tokens: int = 8192  # drop charts longer than this
 
     # Misc
     num_workers: int = 4
@@ -85,12 +88,14 @@ def _build_dataloaders(
         split="train",
         val_fraction=cfg.val_fraction,
         mel_stats=mel_stats,
+        max_tokens=cfg.max_tokens,
     )
     ds_val = MaiMaiDataset(
         cfg.data_dir,
         split="val",
         val_fraction=cfg.val_fraction,
         mel_stats=mel_stats,
+        max_tokens=cfg.max_tokens,
     )
 
     dl_train = DataLoader(
@@ -131,7 +136,16 @@ def _compute_accuracy(
 
 def train(cfg: TrainConfig) -> None:
     _set_seed(cfg.seed)
-    device = torch.device(cfg.device if torch.cuda.is_available() else "cpu")
+    # Resolve device, falling back with a warning if the requested device is
+    # unavailable, but never silently ignoring the user's choice.
+    device_str = cfg.device
+    if device_str == "cuda" and not torch.cuda.is_available():
+        print("Warning: CUDA not available, falling back to CPU")
+        device_str = "cpu"
+    elif device_str == "mps" and not torch.backends.mps.is_available():
+        print("Warning: MPS not available, falling back to CPU")
+        device_str = "cpu"
+    device = torch.device(device_str)
     print(f"Device: {device}")
 
     # ── Mel stats ────────────────────────────────────────────────────────
@@ -168,6 +182,12 @@ def train(cfg: TrainConfig) -> None:
     scheduler = CosineAnnealingWarmRestarts(optimizer, T_0=cfg.warmup_steps, T_mult=2)
     criterion = nn.CrossEntropyLoss(ignore_index=PAD)
 
+    # AMP scaler (CUDA only – no-op on CPU / MPS)
+    use_amp = device.type == "cuda"
+    scaler = torch.amp.GradScaler("cuda") if use_amp else None
+    if use_amp:
+        print("Using AMP (automatic mixed precision)")
+
     # ── Checkpoint dir ───────────────────────────────────────────────────
     ckpt_dir = Path(cfg.checkpoint_dir)
     ckpt_dir.mkdir(parents=True, exist_ok=True)
@@ -193,28 +213,38 @@ def train(cfg: TrainConfig) -> None:
             spec_mask = batch["spec_mask"].to(device)
             tok_mask = batch["tok_mask"].to(device)
 
-            logits, targets = model(
-                spectrogram,
-                bpm_signal,
-                chart_constant,
-                tokens,
-                abs_times,
-                spec_mask=spec_mask,
-                tok_mask=tok_mask,
-            )
+            with torch.amp.autocast("cuda" if use_amp else "cpu", enabled=use_amp):
+                logits, targets = model(
+                    spectrogram,
+                    bpm_signal,
+                    chart_constant,
+                    tokens,
+                    abs_times,
+                    spec_mask=spec_mask,
+                    tok_mask=tok_mask,
+                )
+                loss = criterion(logits.reshape(-1, VOCAB_SIZE), targets.reshape(-1))
+                loss = loss / cfg.gradient_accumulation_steps
 
-            loss = criterion(logits.reshape(-1, VOCAB_SIZE), targets.reshape(-1))
-            loss = loss / cfg.gradient_accumulation_steps
-            loss.backward()
+            if use_amp:
+                scaler.scale(loss).backward()
+            else:
+                loss.backward()
 
             accum_loss += loss.item() * cfg.gradient_accumulation_steps
             epoch_loss += loss.item() * cfg.gradient_accumulation_steps
-            epoch_acc += _compute_accuracy(logits, targets)
+            epoch_acc += _compute_accuracy(logits.float(), targets)
             epoch_batches += 1
 
             if (batch_idx + 1) % cfg.gradient_accumulation_steps == 0:
+                if use_amp:
+                    scaler.unscale_(optimizer)
                 nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
-                optimizer.step()
+                if use_amp:
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    optimizer.step()
                 scheduler.step()
                 optimizer.zero_grad()
                 global_step += 1
@@ -281,6 +311,7 @@ def _validate(
     model.eval()
     total_loss = 0.0
     n = 0
+    use_amp = device.type == "cuda"
     for batch in dl_val:
         if n >= max_batches:
             break
@@ -292,16 +323,13 @@ def _validate(
         spec_mask = batch["spec_mask"].to(device)
         tok_mask = batch["tok_mask"].to(device)
 
-        logits, targets = model(
-            spectrogram,
-            bpm_signal,
-            chart_constant,
-            tokens,
-            abs_times,
-            spec_mask=spec_mask,
-            tok_mask=tok_mask,
-        )
-        loss = criterion(logits.reshape(-1, VOCAB_SIZE), targets.reshape(-1))
+        with torch.amp.autocast("cuda" if use_amp else "cpu", enabled=use_amp):
+            logits, targets = model(
+                spectrogram, bpm_signal, chart_constant,
+                tokens, abs_times,
+                spec_mask=spec_mask, tok_mask=tok_mask,
+            )
+            loss = criterion(logits.reshape(-1, VOCAB_SIZE), targets.reshape(-1))
         total_loss += loss.item()
         n += 1
     return total_loss / max(n, 1)

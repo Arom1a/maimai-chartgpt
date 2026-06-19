@@ -93,6 +93,10 @@ class MaiMaiDataset(Dataset):
         ``(mean, std)`` tensors of shape ``(N_MELS,)`` for per-channel
         standardisation.  If ``None`` the values are computed lazily
         (slower on first epoch).
+    max_tokens : int or None
+        If set, charts that tokenize to more than *max_tokens* tokens are
+        skipped.  This keeps outlier charts from blowing up batch memory.
+        Default ``8192`` covers ~99 % of the dataset.
     """
 
     def __init__(
@@ -101,6 +105,7 @@ class MaiMaiDataset(Dataset):
         split: str = "train",
         val_fraction: float = 0.1,
         mel_stats: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        max_tokens: Optional[int] = 8192,
     ) -> None:
         super().__init__()
         self.data_dir = Path(data_dir)
@@ -133,6 +138,18 @@ class MaiMaiDataset(Dataset):
             self.samples = train_samples
         else:
             self.samples = val_samples
+
+        # Filter by estimated token length (fast pre-check using note count)
+        if max_tokens is not None:
+            filtered: List[Tuple[Path, int]] = []
+            for json_path, ci in self.samples:
+                with open(json_path) as f:
+                    data = json.load(f)
+                # Rough estimate: ~6.4 tokens per note + 2 for SOS/EOS
+                est_tokens = len(data["charts"][ci]["notes"]) * 7 + 2
+                if est_tokens <= max_tokens:
+                    filtered.append((json_path, ci))
+            self.samples = filtered
 
         # Mel stats
         if mel_stats is not None:

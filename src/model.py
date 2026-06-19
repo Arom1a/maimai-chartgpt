@@ -27,12 +27,13 @@ from src.tokenizer import (
 @dataclass
 class ChartGPTConfig:
     d_model: int = 512
-    nhead: int = 8
-    num_decoder_layers: int = 6
-    dim_feedforward: int = 2048
+    nhead: int = 4
+    num_decoder_layers: int = 4
+    dim_feedforward: int = 1024
     dropout: float = 0.1
     n_mels: int = 128
     max_abs_time: float = 300.0  # max song duration for time embedding scale
+    enable_checkpointing: bool = True
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -262,13 +263,28 @@ class ChartGPT(nn.Module):
             tgt_key_padding_mask = tok_mask[:, :-1]
 
         # ── Decode ─────────────────────────────────────────────────────
-        dec_out = self.decoder(
-            tgt=tgt_emb,
-            memory=memory,
-            tgt_mask=tgt_mask,
-            tgt_key_padding_mask=tgt_key_padding_mask,
-            memory_key_padding_mask=memory_key_padding_mask,
-        )  # (B, L-1, d_model)
+        if self.training and self.config.enable_checkpointing:
+            dec_out = torch.utils.checkpoint.checkpoint(
+                self.decoder,
+                tgt_emb,
+                memory,
+                tgt_mask,
+                None,  # memory_mask
+                tgt_key_padding_mask,
+                memory_key_padding_mask,
+                None,  # tgt_is_causal (use tgt_mask instead)
+                False,  # memory_is_causal
+                use_reentrant=False,
+            )
+        else:
+            dec_out = self.decoder(
+                tgt=tgt_emb,
+                memory=memory,
+                tgt_mask=tgt_mask,
+                tgt_key_padding_mask=tgt_key_padding_mask,
+                memory_key_padding_mask=memory_key_padding_mask,
+            )
+        # dec_out: (B, L-1, d_model)
 
         logits = self.output_head(dec_out)  # (B, L-1, VOCAB_SIZE)
         return logits, dec_target
