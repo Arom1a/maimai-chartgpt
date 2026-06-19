@@ -260,69 +260,37 @@ class ChartGPT(nn.Module):
         if tok_mask is not None:
             tgt_key_padding_mask = tok_mask[:, :-1]
 
-        # ── Decode ─────────────────────────────────────────────────────
-        # On CUDA: use is_causal=True so PyTorch dispatches to Flash Attention
-        # (no materialised (L, L) mask).  On CPU / MPS: fall back to an
-        # explicit bool causal mask (Flash Attention is CUDA-only).
-        use_flash_causal = (
-            tgt_emb.device.type == "cuda"
-            and torch.backends.cuda.flash_sdp_enabled()
+        # Explicit causal bool mask.  PyTorch SDPA detects the triangular
+        # pattern and dispatches to Flash Attention / Memory-Efficient
+        # Attention on CUDA without materialising the full (L, L) matrix.
+        tgt_mask = torch.triu(
+            torch.ones(dec_input.shape[1], dec_input.shape[1],
+                       device=dec_input.device, dtype=torch.bool),
+            diagonal=1,
         )
 
+        # ── Decode ─────────────────────────────────────────────────────
         if self.training and self.config.enable_checkpointing:
-            if use_flash_causal:
-                dec_out = torch.utils.checkpoint.checkpoint(
-                    self.decoder,
-                    tgt_emb,
-                    memory,
-                    None,  # tgt_mask
-                    None,  # memory_mask
-                    tgt_key_padding_mask,
-                    memory_key_padding_mask,
-                    True,  # tgt_is_causal
-                    False,  # memory_is_causal
-                    use_reentrant=False,
-                )
-            else:
-                tgt_mask = torch.triu(
-                    torch.ones(dec_input.shape[1], dec_input.shape[1],
-                               device=dec_input.device, dtype=torch.bool),
-                    diagonal=1,
-                )
-                dec_out = torch.utils.checkpoint.checkpoint(
-                    self.decoder,
-                    tgt_emb,
-                    memory,
-                    tgt_mask,
-                    None,
-                    tgt_key_padding_mask,
-                    memory_key_padding_mask,
-                    None,
-                    False,
-                    use_reentrant=False,
-                )
+            dec_out = torch.utils.checkpoint.checkpoint(
+                self.decoder,
+                tgt_emb,
+                memory,
+                tgt_mask,
+                None,  # memory_mask
+                tgt_key_padding_mask,
+                memory_key_padding_mask,
+                None,  # tgt_is_causal
+                False,  # memory_is_causal
+                use_reentrant=False,
+            )
         else:
-            if use_flash_causal:
-                dec_out = self.decoder(
-                    tgt=tgt_emb,
-                    memory=memory,
-                    tgt_key_padding_mask=tgt_key_padding_mask,
-                    memory_key_padding_mask=memory_key_padding_mask,
-                    tgt_is_causal=True,
-                )
-            else:
-                tgt_mask = torch.triu(
-                    torch.ones(dec_input.shape[1], dec_input.shape[1],
-                               device=dec_input.device, dtype=torch.bool),
-                    diagonal=1,
-                )
-                dec_out = self.decoder(
-                    tgt=tgt_emb,
-                    memory=memory,
-                    tgt_mask=tgt_mask,
-                    tgt_key_padding_mask=tgt_key_padding_mask,
-                    memory_key_padding_mask=memory_key_padding_mask,
-                )
+            dec_out = self.decoder(
+                tgt=tgt_emb,
+                memory=memory,
+                tgt_mask=tgt_mask,
+                tgt_key_padding_mask=tgt_key_padding_mask,
+                memory_key_padding_mask=memory_key_padding_mask,
+            )
         # dec_out: (B, L-1, d_model)
 
         return dec_out, dec_target
@@ -383,23 +351,14 @@ class ChartGPT(nn.Module):
 
             tgt_emb = tok_emb + time_emb + pos_emb
 
-            # Dispatch: is_causal on CUDA (Flash Attn), explicit mask otherwise
-            if device.type == "cuda" and torch.backends.cuda.flash_sdp_enabled():
-                dec_out = self.decoder(
-                    tgt=tgt_emb,
-                    memory=memory,
-                    tgt_is_causal=True,
-                )
-            else:
-                tgt_mask = torch.triu(
-                    torch.ones(L, L, device=device, dtype=torch.bool), diagonal=1
-                )
-                dec_out = self.decoder(
-                    tgt=tgt_emb,
-                    memory=memory,
-                    tgt_mask=tgt_mask,
-                )
-            # (1, L, d_model)
+            tgt_mask = torch.triu(
+                torch.ones(L, L, device=device, dtype=torch.bool), diagonal=1
+            )
+            dec_out = self.decoder(
+                tgt=tgt_emb,
+                memory=memory,
+                tgt_mask=tgt_mask,
+            )
 
             # Last position logits
             logits = self.output_head(dec_out[:, -1, :]).squeeze(0)  # (V,)
