@@ -31,7 +31,7 @@ class ChartGPTConfig:
     num_decoder_layers: int = 4
     dim_feedforward: int = 1024
     dropout: float = 0.1
-    n_mels: int = 128
+    n_mels: int = 80
     max_abs_time: float = 300.0  # max song duration for time embedding scale
     enable_checkpointing: bool = True
 
@@ -217,9 +217,16 @@ class ChartGPT(nn.Module):
 
         Returns
         -------
-        ``(logits, targets)``
-            logits: ``(B, L-1, VOCAB_SIZE)``
+        ``(dec_out, targets)``
+            dec_out: ``(B, L-1, d_model)`` — raw decoder output (no projection).
             targets: ``(B, L-1)`` — shifted right by 1 from *target_tokens*.
+
+        Notes
+        -----
+        The output projection to vocabulary size is **not** applied here.
+        Call :meth:`compute_logits_chunk` or iterate over
+        ``model.output_head(dec_out[:, start:end])`` in chunks to avoid
+        materialising the giant ``(B, L, 13267)`` tensor on GPU.
         """
         B = spectrogram.shape[0]
 
@@ -230,8 +237,6 @@ class ChartGPT(nn.Module):
         # Build encoder padding mask from spec_mask (if provided)
         memory_key_padding_mask: Optional[torch.Tensor] = None
         if spec_mask is not None:
-            # spec_mask is (B, T_spec) → need (B, T_enc)
-            # Resample mask to encoder output length
             T_enc = memory.shape[1]
             mask_float = (~spec_mask).float().unsqueeze(1)  # (B, 1, T_spec)
             mask_float = F.interpolate(mask_float, size=T_enc, mode="nearest")
@@ -241,21 +246,14 @@ class ChartGPT(nn.Module):
         dec_input = target_tokens[:, :-1]  # (B, L-1)
         dec_target = target_tokens[:, 1:]  # (B, L-1)
         dec_abs_times = target_abs_times[:, :-1]  # (B, L-1)
-        L_dec = dec_input.shape[1]
 
         # Embeddings
         tok_emb = self.token_emb(dec_input)  # (B, L-1, d_model)
         time_emb = self.abs_time_emb(dec_abs_times.unsqueeze(-1))  # (B, L-1, d_model)
-        positions = torch.arange(L_dec, device=dec_input.device).unsqueeze(0)
+        positions = torch.arange(dec_input.shape[1], device=dec_input.device).unsqueeze(0)
         pos_emb = self.pos_enc(positions)  # (1, L-1, d_model)
 
         tgt_emb = tok_emb + time_emb + pos_emb  # (B, L-1, d_model)
-
-        # Causal mask
-        tgt_mask = torch.triu(
-            torch.ones(L_dec, L_dec, device=dec_input.device, dtype=torch.bool),
-            diagonal=1,
-        )
 
         # Decoder padding mask
         tgt_key_padding_mask: Optional[torch.Tensor] = None
@@ -263,31 +261,71 @@ class ChartGPT(nn.Module):
             tgt_key_padding_mask = tok_mask[:, :-1]
 
         # ── Decode ─────────────────────────────────────────────────────
+        # On CUDA: use is_causal=True so PyTorch dispatches to Flash Attention
+        # (no materialised (L, L) mask).  On CPU / MPS: fall back to an
+        # explicit bool causal mask (Flash Attention is CUDA-only).
+        use_flash_causal = (
+            tgt_emb.device.type == "cuda"
+            and torch.backends.cuda.flash_sdp_enabled()
+        )
+
         if self.training and self.config.enable_checkpointing:
-            dec_out = torch.utils.checkpoint.checkpoint(
-                self.decoder,
-                tgt_emb,
-                memory,
-                tgt_mask,
-                None,  # memory_mask
-                tgt_key_padding_mask,
-                memory_key_padding_mask,
-                None,  # tgt_is_causal (use tgt_mask instead)
-                False,  # memory_is_causal
-                use_reentrant=False,
-            )
+            if use_flash_causal:
+                dec_out = torch.utils.checkpoint.checkpoint(
+                    self.decoder,
+                    tgt_emb,
+                    memory,
+                    None,  # tgt_mask
+                    None,  # memory_mask
+                    tgt_key_padding_mask,
+                    memory_key_padding_mask,
+                    True,  # tgt_is_causal
+                    False,  # memory_is_causal
+                    use_reentrant=False,
+                )
+            else:
+                tgt_mask = torch.triu(
+                    torch.ones(dec_input.shape[1], dec_input.shape[1],
+                               device=dec_input.device, dtype=torch.bool),
+                    diagonal=1,
+                )
+                dec_out = torch.utils.checkpoint.checkpoint(
+                    self.decoder,
+                    tgt_emb,
+                    memory,
+                    tgt_mask,
+                    None,
+                    tgt_key_padding_mask,
+                    memory_key_padding_mask,
+                    None,
+                    False,
+                    use_reentrant=False,
+                )
         else:
-            dec_out = self.decoder(
-                tgt=tgt_emb,
-                memory=memory,
-                tgt_mask=tgt_mask,
-                tgt_key_padding_mask=tgt_key_padding_mask,
-                memory_key_padding_mask=memory_key_padding_mask,
-            )
+            if use_flash_causal:
+                dec_out = self.decoder(
+                    tgt=tgt_emb,
+                    memory=memory,
+                    tgt_key_padding_mask=tgt_key_padding_mask,
+                    memory_key_padding_mask=memory_key_padding_mask,
+                    tgt_is_causal=True,
+                )
+            else:
+                tgt_mask = torch.triu(
+                    torch.ones(dec_input.shape[1], dec_input.shape[1],
+                               device=dec_input.device, dtype=torch.bool),
+                    diagonal=1,
+                )
+                dec_out = self.decoder(
+                    tgt=tgt_emb,
+                    memory=memory,
+                    tgt_mask=tgt_mask,
+                    tgt_key_padding_mask=tgt_key_padding_mask,
+                    memory_key_padding_mask=memory_key_padding_mask,
+                )
         # dec_out: (B, L-1, d_model)
 
-        logits = self.output_head(dec_out)  # (B, L-1, VOCAB_SIZE)
-        return logits, dec_target
+        return dec_out, dec_target
 
     @torch.no_grad()
     def generate(
@@ -345,17 +383,23 @@ class ChartGPT(nn.Module):
 
             tgt_emb = tok_emb + time_emb + pos_emb
 
-            # Causal mask
-            tgt_mask = torch.triu(
-                torch.ones(L, L, device=device, dtype=torch.bool), diagonal=1
-            )
-
-            # Decode
-            dec_out = self.decoder(
-                tgt=tgt_emb,
-                memory=memory,
-                tgt_mask=tgt_mask,
-            )  # (1, L, d_model)
+            # Dispatch: is_causal on CUDA (Flash Attn), explicit mask otherwise
+            if device.type == "cuda" and torch.backends.cuda.flash_sdp_enabled():
+                dec_out = self.decoder(
+                    tgt=tgt_emb,
+                    memory=memory,
+                    tgt_is_causal=True,
+                )
+            else:
+                tgt_mask = torch.triu(
+                    torch.ones(L, L, device=device, dtype=torch.bool), diagonal=1
+                )
+                dec_out = self.decoder(
+                    tgt=tgt_emb,
+                    memory=memory,
+                    tgt_mask=tgt_mask,
+                )
+            # (1, L, d_model)
 
             # Last position logits
             logits = self.output_head(dec_out[:, -1, :]).squeeze(0)  # (V,)

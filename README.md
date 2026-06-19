@@ -41,7 +41,8 @@ python src/tokenizer.py
 
 ## Pre-compute Mel Statistics
 
-Before training, compute per-channel mel spectrogram mean/std:
+Before training, compute per-channel mel spectrogram mean/std (80 mel bands,
+10 ms hop, 16 kHz mono).  **Re-run this after changing any audio parameter.**
 
 ```bash
 python -c "
@@ -51,6 +52,13 @@ mean, std = compute_mel_stats('./dataset', max_files=200, device='cpu')
 torch.save({'mean': mean, 'std': std}, './dataset/mel_stats.pt')
 print('Saved mel_stats.pt')
 "
+```
+
+If you already have a stale `mel_stats.pt` from a different `n_mels` value,
+delete it first:
+
+```bash
+rm ./dataset/mel_stats.pt
 ```
 
 ## Training

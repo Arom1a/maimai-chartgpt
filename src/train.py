@@ -118,15 +118,50 @@ def _build_dataloaders(
     return dl_train, dl_val
 
 
-def _compute_accuracy(
-    logits: torch.Tensor, targets: torch.Tensor, pad_id: int = PAD
+def _compute_loss_chunked(
+    model: nn.Module,
+    dec_out: torch.Tensor,
+    targets: torch.Tensor,
+    criterion: nn.Module,
+    chunk_size: int = 512,
+) -> Tuple[torch.Tensor, int]:
+    """Compute cross-entropy loss in chunks to avoid ``(B, L, V)`` logits."""
+    B, L, _ = dec_out.shape
+    total_loss = torch.tensor(0.0, device=dec_out.device)
+    total_tokens = 0
+    for start in range(0, L, chunk_size):
+        end = min(start + chunk_size, L)
+        chunk_logits = model.output_head(dec_out[:, start:end, :])  # (B, C, V)
+        chunk_targets = targets[:, start:end]  # (B, C)
+        n_tokens = chunk_targets.numel()
+        if n_tokens == 0:
+            continue
+        chunk_loss = criterion(
+            chunk_logits.reshape(-1, VOCAB_SIZE), chunk_targets.reshape(-1)
+        )
+        total_loss = total_loss + chunk_loss * n_tokens
+        total_tokens += n_tokens
+    return total_loss / max(total_tokens, 1), total_tokens
+
+
+def _compute_accuracy_on_sample(
+    model: nn.Module,
+    dec_out: torch.Tensor,
+    targets: torch.Tensor,
+    pad_id: int = PAD,
+    max_tokens: int = 2048,
 ) -> float:
-    """Token-level accuracy ignoring padding."""
+    """Token accuracy on the first *max_tokens* valid positions only."""
+    B = dec_out.shape[0]
+    # Flatten and clip
+    flat_dec = dec_out.reshape(B, -1, dec_out.shape[-1])[:, :max_tokens, :]
+    flat_tgt = targets.reshape(B, -1)[:, :max_tokens]
+    logits = model.output_head(flat_dec)  # (B, max_tokens, V)
     preds = logits.argmax(dim=-1)
-    mask = targets != pad_id
+    mask = flat_tgt != pad_id
     if mask.sum() == 0:
         return 0.0
-    return (preds[mask] == targets[mask]).float().mean().item()
+    return (preds[mask] == flat_tgt[mask]).float().mean().item()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -214,7 +249,7 @@ def train(cfg: TrainConfig) -> None:
             tok_mask = batch["tok_mask"].to(device)
 
             with torch.amp.autocast("cuda" if use_amp else "cpu", enabled=use_amp):
-                logits, targets = model(
+                dec_out, targets = model(
                     spectrogram,
                     bpm_signal,
                     chart_constant,
@@ -223,7 +258,9 @@ def train(cfg: TrainConfig) -> None:
                     spec_mask=spec_mask,
                     tok_mask=tok_mask,
                 )
-                loss = criterion(logits.reshape(-1, VOCAB_SIZE), targets.reshape(-1))
+                loss, _ = _compute_loss_chunked(
+                    model, dec_out, targets, criterion, chunk_size=512
+                )
                 loss = loss / cfg.gradient_accumulation_steps
 
             if use_amp:
@@ -233,7 +270,7 @@ def train(cfg: TrainConfig) -> None:
 
             accum_loss += loss.item() * cfg.gradient_accumulation_steps
             epoch_loss += loss.item() * cfg.gradient_accumulation_steps
-            epoch_acc += _compute_accuracy(logits.float(), targets)
+            epoch_acc += _compute_accuracy_on_sample(model, dec_out.float(), targets)
             epoch_batches += 1
 
             if (batch_idx + 1) % cfg.gradient_accumulation_steps == 0:
@@ -324,12 +361,14 @@ def _validate(
         tok_mask = batch["tok_mask"].to(device)
 
         with torch.amp.autocast("cuda" if use_amp else "cpu", enabled=use_amp):
-            logits, targets = model(
+            dec_out, targets = model(
                 spectrogram, bpm_signal, chart_constant,
                 tokens, abs_times,
                 spec_mask=spec_mask, tok_mask=tok_mask,
             )
-            loss = criterion(logits.reshape(-1, VOCAB_SIZE), targets.reshape(-1))
+            loss, _ = _compute_loss_chunked(
+                model, dec_out, targets, criterion, chunk_size=512
+            )
         total_loss += loss.item()
         n += 1
     return total_loss / max(n, 1)
@@ -369,8 +408,17 @@ def _val_decode_sample(
         return
 
     # Basic stats
-    gt_notes = ChartTokenizer._decode_notes_standalone(gt_tokens)
-    gen_notes = ChartTokenizer._decode_notes_standalone(gen_tokens)
+    try:
+        gt_notes = ChartTokenizer._decode_notes_standalone(gt_tokens)
+    except Exception as e:
+        gt_notes = []
+        print(f"  [decode GT error: {e}]")
+
+    try:
+        gen_notes = ChartTokenizer._decode_notes_standalone(gen_tokens)
+    except Exception as e:
+        gen_notes = []
+        print(f"  [decode GEN error (expected for untrained model): {e}]")
 
     print(
         f"  [val sample] GT: {len(gt_notes)} notes, "

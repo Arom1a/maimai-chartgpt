@@ -26,7 +26,7 @@ from src.tokenizer import (
 TARGET_SAMPLE_RATE = 16000
 MEL_HOP_LENGTH = 160  # 10 ms at 16 kHz → 100 Hz
 MEL_WIN_LENGTH = 512  # 32 ms window
-N_MELS = 128
+N_MELS = 80
 ENC_STRIDE = 8  # 3 × stride-2 conv blocks → 12.5 Hz
 
 
@@ -115,7 +115,7 @@ class MaiMaiDataset(Dataset):
         # Gather all (processed_json_path, chart_index) samples
         self.samples: List[Tuple[Path, int]] = []
         for json_path in sorted(self.data_dir.rglob("processed.json")):
-            with open(json_path) as f:
+            with open(json_path, "rb") as f:
                 data = json.load(f)
             title_hash = hash(data["title"])  # deterministic across runs
             for ci in range(len(data["charts"])):
@@ -126,7 +126,7 @@ class MaiMaiDataset(Dataset):
         train_samples: List[Tuple[Path, int]] = []
         val_samples: List[Tuple[Path, int]] = []
         for json_path, ci in self.samples:
-            with open(json_path) as f:
+            with open(json_path, "rb") as f:
                 data = json.load(f)
             bucket = abs(hash(data["title"])) % 100
             if bucket < int(self.val_fraction * 100):
@@ -143,7 +143,7 @@ class MaiMaiDataset(Dataset):
         if max_tokens is not None:
             filtered: List[Tuple[Path, int]] = []
             for json_path, ci in self.samples:
-                with open(json_path) as f:
+                with open(json_path, "rb") as f:
                     data = json.load(f)
                 # Rough estimate: ~6.4 tokens per note + 2 for SOS/EOS
                 est_tokens = len(data["charts"][ci]["notes"]) * 7 + 2
@@ -213,7 +213,7 @@ class MaiMaiDataset(Dataset):
         # Device defaults to CPU for DataLoader workers
         device = torch.device("cpu")
 
-        with open(json_path) as f:
+        with open(json_path, "rb") as f:
             song_data = json.load(f)
         chart = song_data["charts"][chart_idx]
 
