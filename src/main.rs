@@ -11,32 +11,26 @@ fn main() {
         if !version_path.is_dir() {
             continue;
         }
-        for sub_version in fs::read_dir(version_path).unwrap().flatten() {
-            let sub_version_path = sub_version.path();
-            if !sub_version_path.is_dir() {
+        for id in fs::read_dir(&version_path).unwrap().flatten() {
+            let id_path = id.path();
+            if !id_path.is_dir() {
                 continue;
             }
-            for id in fs::read_dir(sub_version_path).unwrap().flatten() {
-                let id_path = id.path();
-                if !id_path.is_dir() {
-                    continue;
+            let file = id_path.join("maidata.txt");
+            println!("Processing {}", file.to_string_lossy());
+            let content = fs::read_to_string(&file).unwrap();
+            let processed = match parse_entire_file(&content) {
+                Ok(ok) => ok,
+                Err(ProcessError::Utage) => continue,
+                Err(ProcessError::Nom(e)) => {
+                    eprint!("Parse error: {}", e);
+                    panic!();
                 }
-                let file = id_path.join("maidata.txt");
-                println!("Processing {}", file.to_string_lossy());
-                let content = fs::read_to_string(&file).unwrap();
-                let processed = match parse_entire_file(&content) {
-                    Ok(ok) => ok,
-                    Err(ProcessError::Utage) => continue,
-                    Err(ProcessError::Nom(e)) => {
-                        eprint!("Parse error: {}", e);
-                        panic!();
-                    }
-                };
-                processed_cnt += 1;
-                let output = file.with_file_name("processed.json");
-                let processed_json = serde_json::to_string_pretty(&processed).unwrap();
-                fs::write(output, processed_json).unwrap();
-            }
+            };
+            processed_cnt += 1;
+            let output = file.with_file_name("processed.json");
+            let processed_json = serde_json::to_string_pretty(&processed).unwrap();
+            fs::write(output, processed_json).unwrap();
         }
     }
 
