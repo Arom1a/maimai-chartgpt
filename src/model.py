@@ -304,6 +304,7 @@ class ChartGPT(nn.Module):
         *,
         max_len: int = 8000,
         temperature: float = 1.0,
+        validator=None,  # Optional[ChartValidator]
     ) -> List[int]:
         """Autoregressively generate a token sequence for one song.
 
@@ -316,6 +317,9 @@ class ChartGPT(nn.Module):
             Maximum number of tokens to generate.
         temperature : float
             Softmax temperature.  ``0.0`` → greedy argmax.
+        validator : ChartValidator or None
+            If provided, invalid tokens are masked before sampling so the
+            output stream is guaranteed syntactically valid.
 
         Returns
         -------
@@ -363,6 +367,12 @@ class ChartGPT(nn.Module):
             # Last position logits
             logits = self.output_head(dec_out[:, -1, :]).squeeze(0)  # (V,)
 
+            # Mask syntactically invalid tokens if validator is provided
+            if validator is not None:
+                mask = validator.valid_mask(device=device)
+                if mask.any():
+                    logits[~mask] = float("-inf")
+
             if temperature <= 0.0:
                 next_token = torch.argmax(logits).item()
             else:
@@ -370,6 +380,10 @@ class ChartGPT(nn.Module):
                 next_token = torch.multinomial(probs, 1).item()
 
             generated.append(next_token)
+
+            # Advance validator state
+            if validator is not None:
+                validator.advance(next_token)
 
             if next_token == EOS:
                 break

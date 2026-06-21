@@ -21,6 +21,7 @@ from src.dataloader import (
     compute_mel_stats,
 )
 from src.model import ChartGPT, ChartGPTConfig
+from src.token_validator import ChartValidator
 from src.tokenizer import EOS, PAD, VOCAB_SIZE, ChartTokenizer
 
 
@@ -421,6 +422,7 @@ def _val_decode_sample(
             chart_constant,
             max_len=len(gt_tokens) + 100,
             temperature=0.0,
+            validator=ChartValidator(),
         )
     except Exception as e:
         print(f"  [generate error: {e}]")
