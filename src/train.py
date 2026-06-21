@@ -471,6 +471,14 @@ def _save_checkpoint(
             "step": step,
             "epoch": epoch,
             "best_val_loss": best_loss,
+            "config": {
+                "d_model": model.config.d_model,
+                "nhead": model.config.nhead,
+                "num_decoder_layers": model.config.num_decoder_layers,
+                "dim_feedforward": model.config.dim_feedforward,
+                "dropout": model.config.dropout,
+                "n_mels": model.config.n_mels,
+            },
         },
         path,
     )

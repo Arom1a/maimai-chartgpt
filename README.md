@@ -92,29 +92,53 @@ loss.
 
 ## Inference
 
-```python
-from src.model import ChartGPT
-from src.dataloader import MaiMaiDataset
+Generate a chart from audio.  Choose one BPM source:
 
-# Load model
-model = ChartGPT()
-model.load_state_dict(torch.load("checkpoints/best.pt")["model_state_dict"])
-model.eval()
+```bash
+# Constant BPM
+python main.py --checkpoint checkpoints/best.pt --audio track.mp3 \
+    --bpm 175.0 --constant "12,5" --title "My Song"
 
-# Load a sample
-ds = MaiMaiDataset("./dataset", split="val", mel_stats=(mean, std))
-sample = ds[0]
-
-# Generate
-tokens = model.generate(
-    sample["spectrogram"].unsqueeze(0),
-    sample["bpm_signal"].unsqueeze(0),
-    sample["chart_constant"].unsqueeze(0),
-    max_len=8000,
-    temperature=1.0,
-)
-
-# Decode
-from src.tokenizer import ChartTokenizer
-notes = ChartTokenizer._decode_notes_standalone(tokens)
+# Variable BPM from a metadata file
+python main.py --checkpoint checkpoints/best.pt --audio track.mp3 \
+    --chart_metadata meta.json --constant "12,5"
 ```
+
+The ``--chart_metadata`` JSON format:
+
+```json
+{
+  "title": "Song Title",
+  "artist": "Artist Name",
+  "bpm10_list": [
+    {"bpm10": 1750, "change_timestamp_ms": 0},
+    {"bpm10": 2000, "change_timestamp_ms": 60000}
+  ]
+}
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `--checkpoint` | *(required)* | Model checkpoint (.pt) |
+| `--audio` | *(required)* | Input audio file (mp3/wav) |
+| `--bpm` | — | Constant BPM (mutually exclusive with `--chart_metadata`) |
+| `--chart_metadata` | — | JSON with `title`/`artist`/`bpm10_list` |
+| `--constant` | *(required)* | Target difficulty, e.g. `"12,5"` |
+| `--max_tokens` | `8000` | Max tokens to generate |
+| `--temperature` | `1.0` | `0.0` = greedy, `1.0` = sampling |
+| `--device` | `cuda` | `cuda`, `cpu`, or `mps` |
+| `--output` | *(stdout)* | Save path for generated chart JSON |
+| `--mel_stats` | `./dataset/mel_stats.pt` | Mel normalization stats |
+| `--title` | — | Song title (embedded in output) |
+| `--artist` | — | Song artist (embedded in output) |
+
+The output JSON follows the same ``processed.json`` schema (includes ``title``,
+``artist``, ``cabinet``, ``version``, ``charts`` with ``constant``,
+``designer``, ``bpm10_list``, and ``notes``).
+
+### Speed note
+
+Generation is currently **O(n²)** in token count (no KV‑caching).  It runs
+fast for the first ~500 tokens and slows down progressively.  For a
+full‑length chart (~5 000 tokens), expect several minutes on GPU.
+KV‑caching will be added in a future update.

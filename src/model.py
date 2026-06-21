@@ -335,6 +335,11 @@ class ChartGPT(nn.Module):
 
         generated = [SOS]
 
+        # Pre-seeded SOS must be consumed by the validator before the loop
+        # so the FSM starts at EXPECT_TIME, not EXPECT_SOS.
+        if validator is not None:
+            validator.advance(SOS)
+
         for _ in range(max_len):
             L = len(generated)
             tgt_tensor = torch.tensor([generated], device=device, dtype=torch.long)

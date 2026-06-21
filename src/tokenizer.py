@@ -355,6 +355,7 @@ class ChartTokenizer:
         """Reconstruct the original note list from a valid token sequence.
 
         The input should include ``SOS`` and ``EOS`` tokens.
+        Returns partial notes if the sequence is truncated.
         """
         notes: List[Dict] = []
         current_time_ms = 0
@@ -367,101 +368,107 @@ class ChartTokenizer:
             if tok == EOS:
                 break
 
-            # 1. Time offset
-            if not is_time_token(tok):
-                raise ValueError(
-                    f"Expected time offset token at position {pos}, got {tok}"
-                )
-            delta_ms = decode_time_token(tok)
-            current_time_ms += delta_ms
-            pos += 1
-
-            # 2. Kind
-            kind = _inv_name(tokens[pos], "KIND_")
-            pos += 1
-
-            # 3. Position
-            note_pos = _inv_name(tokens[pos], "POS_")
-            pos += 1
-
-            # 4. Note decorations
-            decos: List[str] = []
-            while tokens[pos] in (DECO_BREAK, DECO_EX, DECO_FIREWORK):
-                decos.append(_inv_name(tokens[pos], "DECO_"))
-                pos += 1
-            if tokens[pos] == DECO_NONE:
-                pos += 1
-                decos = []
-
-            # 5. Optional wait (Slide only)
-            wait = None
-            if kind == "Slide" and tokens[pos] == WAIT:
-                pos += 1
-                wait, pos = self._decode_duration(tokens, pos)
-
-            # 6. Duration (Hold, TouchHold, Slide)
-            duration = None
-            if kind in ("Hold", "Slide", "TouchHold"):
-                duration, pos = self._decode_duration(tokens, pos)
-
-            # 7. Slide segments
-            slide_segments: List[Dict] = []
-            slide_deco: List[str] = []
-            if kind == "Slide":
-                while tokens[pos] == SEG:
-                    pos += 1
-                    shape = _inv_name(tokens[pos], "SHAPE_")
-                    pos += 1
-                    if shape == "Reflect":
-                        reflect_pos = _inv_name(tokens[pos], "POS_")
-                        pos += 1
-                        end_pos = _inv_name(tokens[pos], "POS_")
-                        pos += 1
-                        slide_segments.append(
-                            {"shape": {"Reflect": reflect_pos}, "end": end_pos}
-                        )
-                    else:
-                        end_pos = _inv_name(tokens[pos], "POS_")
-                        pos += 1
-                        slide_segments.append({"shape": shape, "end": end_pos})
-                # SEG_END
-                if tokens[pos] != SEG_END:
+            try:
+                # 1. Time offset
+                if not is_time_token(tok):
                     raise ValueError(
-                        f"Expected SEG_END at position {pos}, got {tokens[pos]}"
+                        f"Expected time offset token at position {pos}, got {tok}"
                     )
+                delta_ms = decode_time_token(tok)
+                current_time_ms += delta_ms
                 pos += 1
 
-                # 8. Slide decorations
-                while tokens[pos] in (SLIDE_DECO_BREAK,):
-                    slide_deco.append(_inv_name(tokens[pos], "SLIDE_DECO_"))
+                # 2. Kind
+                kind = _inv_name(tokens[pos], "KIND_")
+                pos += 1
+
+                # 3. Position
+                note_pos = _inv_name(tokens[pos], "POS_")
+                pos += 1
+
+                # 4. Note decorations
+                decos: List[str] = []
+                while tokens[pos] in (DECO_BREAK, DECO_EX, DECO_FIREWORK):
+                    decos.append(_inv_name(tokens[pos], "DECO_"))
                     pos += 1
-                if tokens[pos] == SLIDE_DECO_NONE:
+                if tokens[pos] == DECO_NONE:
                     pos += 1
-                    slide_deco = []
+                    decos = []
 
-            # Build note dict
-            note: Dict = {
-                "timestamp_ms": current_time_ms,
-                "kind": kind,
-                "pos": note_pos,
-                "deco": decos,
-                "wait": wait,
-                "duration": duration,
-                "slide_segments": slide_segments,
-                "slide_deco": slide_deco,
-            }
-            notes.append(note)
+                # 5. Optional wait (Slide only)
+                wait = None
+                if kind == "Slide" and tokens[pos] == WAIT:
+                    pos += 1
+                    wait, pos = self._decode_duration(tokens, pos)
 
-            # 9. End-of-note
-            if tokens[pos] == EON:
-                pos += 1
-            elif tokens[pos] == EOS:
-                pos += 1
+                # 6. Duration (Hold, TouchHold, Slide)
+                duration = None
+                if kind in ("Hold", "Slide", "TouchHold"):
+                    duration, pos = self._decode_duration(tokens, pos)
+
+                # 7. Slide segments
+                slide_segments: List[Dict] = []
+                slide_deco: List[str] = []
+                if kind == "Slide":
+                    while tokens[pos] == SEG:
+                        pos += 1
+                        shape = _inv_name(tokens[pos], "SHAPE_")
+                        pos += 1
+                        if shape == "Reflect":
+                            reflect_pos = _inv_name(tokens[pos], "POS_")
+                            pos += 1
+                            end_pos = _inv_name(tokens[pos], "POS_")
+                            pos += 1
+                            slide_segments.append(
+                                {"shape": {"Reflect": reflect_pos}, "end": end_pos}
+                            )
+                        else:
+                            end_pos = _inv_name(tokens[pos], "POS_")
+                            pos += 1
+                            slide_segments.append(
+                                {"shape": shape, "end": end_pos}
+                            )
+                    # SEG_END
+                    if tokens[pos] != SEG_END:
+                        raise ValueError(
+                            f"Expected SEG_END at position {pos}, got {tokens[pos]}"
+                        )
+                    pos += 1
+
+                    # 8. Slide decorations
+                    while tokens[pos] in (SLIDE_DECO_BREAK,):
+                        slide_deco.append(_inv_name(tokens[pos], "SLIDE_DECO_"))
+                        pos += 1
+                    if tokens[pos] == SLIDE_DECO_NONE:
+                        pos += 1
+                        slide_deco = []
+
+                # Build note dict
+                note: Dict = {
+                    "timestamp_ms": current_time_ms,
+                    "kind": kind,
+                    "pos": note_pos,
+                    "deco": decos,
+                    "wait": wait,
+                    "duration": duration,
+                    "slide_segments": slide_segments,
+                    "slide_deco": slide_deco,
+                }
+                notes.append(note)
+
+                # 9. End-of-note
+                if tokens[pos] == EON:
+                    pos += 1
+                elif tokens[pos] == EOS:
+                    pos += 1
+                    break
+                else:
+                    raise ValueError(
+                        f"Expected EON or EOS at position {pos}, got {tokens[pos]}"
+                    )
+            except IndexError:
+                # Sequence truncated mid-expression — return partial notes
                 break
-            else:
-                raise ValueError(
-                    f"Expected EON or EOS at position {pos}, got {tokens[pos]}"
-                )
 
         return notes
 

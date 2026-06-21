@@ -209,9 +209,8 @@ class ChartValidator:
 
         if phase == "POST_DUR":
             if self._note_kind == "Slide":
-                return {SEG, EON, EOS}
-            else:
-                return {EON, EOS}
+                return {SEG}
+            return {EON, EOS}
 
         if phase == "EXPECT_SEG_SHAPE":
             return set(SHAPES.values())
@@ -266,16 +265,18 @@ class ChartValidator:
     def _post_deco_allowed(self) -> Set[int]:
         kind = self._note_kind
         if kind == "Slide":
-            allowed: Set[int] = {EON, EOS}
+            # Slide MUST have duration (and later segments) — no EON yet.
+            allowed: Set[int] = set()
             if not self._wait_done:
                 allowed.add(WAIT)
             if not self._dur_done:
                 allowed.update({DUR_ABS, DUR_SYM})
             return allowed
         elif kind in ("Hold", "TouchHold"):
+            # Hold / TouchHold MUST have duration — no EON without it.
             if self._dur_done:
                 return {EON, EOS}
-            return {DUR_ABS, DUR_SYM, EON, EOS}
+            return {DUR_ABS, DUR_SYM}
         else:  # Tap, Touch
             return {EON, EOS}
 
