@@ -5,7 +5,7 @@ import signal
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -109,14 +109,19 @@ def _set_seed(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
-def _make_worker_init_fn(base_seed: int) -> Callable[[int], None]:
-    """Return a worker init fn that gives each worker a deterministic seed."""
+class _WorkerInitFn:
+    """Picklable worker init callable that seeds each DataLoader worker.
 
-    def worker_init_fn(worker_id: int) -> None:
-        worker_seed = base_seed + worker_id
-        torch.manual_seed(worker_seed)
+    This is defined as a class instead of a closure because Windows uses the
+    ``spawn`` multiprocessing start method, which cannot pickle local
+    functions created inside another function.
+    """
 
-    return worker_init_fn
+    def __init__(self, base_seed: int) -> None:
+        self.base_seed = base_seed
+
+    def __call__(self, worker_id: int) -> None:
+        torch.manual_seed(self.base_seed + worker_id)
 
 
 def _build_train_dataloader(
@@ -143,7 +148,7 @@ def _build_train_dataloader(
         pin_memory=True,
         drop_last=True,
         generator=generator,
-        worker_init_fn=_make_worker_init_fn(cfg.seed + epoch),
+        worker_init_fn=_WorkerInitFn(cfg.seed + epoch),
     )
 
 
