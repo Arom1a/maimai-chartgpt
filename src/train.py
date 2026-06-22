@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 import argparse
-import json
-import os
-import time
+import signal
+import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -70,10 +69,38 @@ class TrainConfig:
     num_workers: int = 4
     seed: int = 42
 
+    # Pause / resume
+    resume: bool = False  # auto-load checkpoints/latest.pt if present
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Helpers
 # ═══════════════════════════════════════════════════════════════════════════════
+
+
+class _PauseController:
+    """Handles Ctrl-C by pausing at the next clean optimizer-step boundary.
+
+    The first SIGINT sets ``pause_requested`` and prints a message.  A second
+    SIGINT forces an immediate exit without saving a checkpoint.
+    """
+
+    def __init__(self) -> None:
+        self.pause_requested = False
+        self.signal_count = 0
+
+    def handler(self, signum, frame) -> None:
+        self.signal_count += 1
+        if self.signal_count == 1:
+            self.pause_requested = True
+            print(
+                "\nCtrl-C pressed: pausing after the current training step. "
+                "Press Ctrl-C again to force quit without saving.",
+                flush=True,
+            )
+        else:
+            print("\nForced exit without saving.", flush=True)
+            sys.exit(1)
 
 
 def _set_seed(seed: int) -> None:
@@ -82,9 +109,21 @@ def _set_seed(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
-def _build_dataloaders(
-    cfg: TrainConfig, mel_stats: Tuple[torch.Tensor, torch.Tensor]
-) -> Tuple[DataLoader, DataLoader]:
+def _make_worker_init_fn(base_seed: int) -> Callable[[int], None]:
+    """Return a worker init fn that gives each worker a deterministic seed."""
+
+    def worker_init_fn(worker_id: int) -> None:
+        worker_seed = base_seed + worker_id
+        torch.manual_seed(worker_seed)
+
+    return worker_init_fn
+
+
+def _build_train_dataloader(
+    cfg: TrainConfig,
+    mel_stats: Tuple[torch.Tensor, torch.Tensor],
+    epoch: int,
+) -> DataLoader:
     ds_train = MaiMaiDataset(
         cfg.data_dir,
         split="train",
@@ -92,15 +131,10 @@ def _build_dataloaders(
         mel_stats=mel_stats,
         max_tokens=cfg.max_tokens,
     )
-    ds_val = MaiMaiDataset(
-        cfg.data_dir,
-        split="val",
-        val_fraction=cfg.val_fraction,
-        mel_stats=mel_stats,
-        max_tokens=cfg.max_tokens,
-    )
-
-    dl_train = DataLoader(
+    # Deterministic per-epoch shuffling so mid-epoch resume replays the same
+    # batch order.
+    generator = torch.Generator().manual_seed(cfg.seed + epoch)
+    return DataLoader(
         ds_train,
         batch_size=cfg.batch_size,
         shuffle=True,
@@ -108,8 +142,22 @@ def _build_dataloaders(
         collate_fn=collate_fn,
         pin_memory=True,
         drop_last=True,
+        generator=generator,
+        worker_init_fn=_make_worker_init_fn(cfg.seed + epoch),
     )
-    dl_val = DataLoader(
+
+
+def _build_val_dataloader(
+    cfg: TrainConfig, mel_stats: Tuple[torch.Tensor, torch.Tensor]
+) -> DataLoader:
+    ds_val = MaiMaiDataset(
+        cfg.data_dir,
+        split="val",
+        val_fraction=cfg.val_fraction,
+        mel_stats=mel_stats,
+        max_tokens=cfg.max_tokens,
+    )
+    return DataLoader(
         ds_val,
         batch_size=cfg.batch_size,
         shuffle=False,
@@ -117,7 +165,6 @@ def _build_dataloaders(
         collate_fn=collate_fn,
         pin_memory=True,
     )
-    return dl_train, dl_val
 
 
 def _compute_loss_chunked(
@@ -171,6 +218,20 @@ def _compute_accuracy_on_sample(
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
+def _capture_rng_state() -> Dict[str, torch.Tensor]:
+    """Capture CPU and (if available) CUDA RNG states for exact resume."""
+    state: Dict[str, torch.Tensor] = {"cpu": torch.get_rng_state()}
+    if torch.cuda.is_available():
+        state["cuda"] = torch.cuda.get_rng_state_all()
+    return state
+
+
+def _restore_rng_state(state: Dict[str, torch.Tensor]) -> None:
+    torch.set_rng_state(state["cpu"])
+    if torch.cuda.is_available() and "cuda" in state:
+        torch.cuda.set_rng_state_all(state["cuda"])
+
+
 def train(cfg: TrainConfig) -> None:
     _set_seed(cfg.seed)
     # Resolve device, falling back with a warning if the requested device is
@@ -198,18 +259,35 @@ def train(cfg: TrainConfig) -> None:
         torch.save({"mean": mel_mean, "std": mel_std}, stats_path)
         print(f"Saved mel stats to {stats_path}")
 
-    # ── Data ─────────────────────────────────────────────────────────────
-    dl_train, dl_val = _build_dataloaders(cfg, (mel_mean, mel_std))
-    print(f"Train charts: {len(dl_train.dataset)}, Val charts: {len(dl_val.dataset)}")
+    # ── Validation data (fixed order, built once) ────────────────────────
+    dl_val = _build_val_dataloader(cfg, (mel_mean, mel_std))
+
+    # ── Checkpoint dir ───────────────────────────────────────────────────
+    ckpt_dir = Path(cfg.checkpoint_dir)
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    latest_path = ckpt_dir / "latest.pt"
+
+    # ── Resume metadata ──────────────────────────────────────────────────
+    resume_ckpt: Optional[Dict] = None
+    if cfg.resume and latest_path.exists():
+        print(f"Loading resume metadata from {latest_path}")
+        resume_ckpt = torch.load(latest_path, map_location="cpu", weights_only=True)
 
     # ── Model ────────────────────────────────────────────────────────────
-    model_cfg = ChartGPTConfig(
-        d_model=cfg.d_model,
-        nhead=cfg.nhead,
-        num_decoder_layers=cfg.num_decoder_layers,
-        dim_feedforward=cfg.dim_feedforward,
-        dropout=cfg.dropout,
-    )
+    if resume_ckpt is not None and "config" in resume_ckpt:
+        model_cfg = ChartGPTConfig(**resume_ckpt["config"])
+        print(
+            f"Resumed model config: d_model={model_cfg.d_model}, "
+            f"nhead={model_cfg.nhead}, layers={model_cfg.num_decoder_layers}"
+        )
+    else:
+        model_cfg = ChartGPTConfig(
+            d_model=cfg.d_model,
+            nhead=cfg.nhead,
+            num_decoder_layers=cfg.num_decoder_layers,
+            dim_feedforward=cfg.dim_feedforward,
+            dropout=cfg.dropout,
+        )
     model = ChartGPT(model_cfg).to(device)
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Model params: {n_params / 1e6:.1f} M")
@@ -219,8 +297,11 @@ def train(cfg: TrainConfig) -> None:
     criterion = nn.CrossEntropyLoss(ignore_index=PAD)
 
     # Linear warmup → cosine decay to eta_min over the rest of training.
-    # Total optimizer steps = batches_per_epoch // accumulation * epochs.
-    steps_per_epoch = len(dl_train) // cfg.gradient_accumulation_steps
+    # We rebuild the train loader each epoch; its length is stable because
+    # drop_last=True.
+    steps_per_epoch = len(
+        _build_train_dataloader(cfg, (mel_mean, mel_std), epoch=1)
+    ) // cfg.gradient_accumulation_steps
     total_steps = cfg.epochs * steps_per_epoch
     warmup_scheduler = LinearLR(
         optimizer, start_factor=1e-3, end_factor=1.0,
@@ -242,15 +323,44 @@ def train(cfg: TrainConfig) -> None:
     if use_amp:
         print("Using AMP (automatic mixed precision)")
 
-    # ── Checkpoint dir ───────────────────────────────────────────────────
-    ckpt_dir = Path(cfg.checkpoint_dir)
-    ckpt_dir.mkdir(parents=True, exist_ok=True)
-
-    # ── Training state ───────────────────────────────────────────────────
+    # ── Resume state ─────────────────────────────────────────────────────
     global_step = 0
     best_val_loss = float("inf")
+    start_epoch = 1
+    resume_batch_idx = 0
 
-    for epoch in range(1, cfg.epochs + 1):
+    if resume_ckpt is not None:
+        model.load_state_dict(resume_ckpt["model_state_dict"])
+        optimizer.load_state_dict(resume_ckpt["optimizer_state_dict"])
+        scheduler.load_state_dict(resume_ckpt["scheduler_state_dict"])
+        if "rng_state" in resume_ckpt:
+            _restore_rng_state(resume_ckpt["rng_state"])
+        start_epoch = resume_ckpt.get("epoch", 1)
+        global_step = resume_ckpt.get("step", 0)
+        best_val_loss = resume_ckpt.get("best_val_loss", float("inf"))
+        resume_batch_idx = resume_ckpt.get("batch_idx", 0)
+        print(
+            f"Resumed training at epoch {start_epoch}, step {global_step}, "
+            f"batch {resume_batch_idx}"
+        )
+        # Discard any partial gradients that may have been in flight when the
+        # previous run was paused.
+        optimizer.zero_grad()
+
+    # ── Pause handling ───────────────────────────────────────────────────
+    pause = _PauseController()
+    signal.signal(signal.SIGINT, pause.handler)
+
+    for epoch in range(start_epoch, cfg.epochs + 1):
+        dl_train = _build_train_dataloader(cfg, (mel_mean, mel_std), epoch)
+        if epoch == start_epoch:
+            print(
+                f"Train charts: {len(dl_train.dataset)}, "
+                f"Val charts: {len(dl_val.dataset)}"
+            )
+        if epoch == start_epoch and resume_batch_idx > 0:
+            print(f"Skipping first {resume_batch_idx} batches of epoch {epoch}")
+
         model.train()
         epoch_loss = 0.0
         epoch_acc = 0.0
@@ -259,6 +369,9 @@ def train(cfg: TrainConfig) -> None:
         pbar = tqdm(dl_train, desc=f"Epoch {epoch}/{cfg.epochs}")
 
         for batch_idx, batch in enumerate(pbar):
+            if epoch == start_epoch and batch_idx < resume_batch_idx:
+                continue
+
             spectrogram = batch["spectrogram"].to(device)
             bpm_signal = batch["bpm_signal"].to(device)
             chart_constant = batch["chart_constant"].to(device)
@@ -312,6 +425,32 @@ def train(cfg: TrainConfig) -> None:
                         gnorm=f"{grad_norm:.1f}",
                     )
                     accum_loss = 0.0
+
+                # Pause on Ctrl-C at a clean optimizer-step boundary.
+                if pause.pause_requested:
+                    next_batch = batch_idx + 1
+                    next_epoch = epoch
+                    if next_batch >= len(dl_train):
+                        next_epoch = epoch + 1
+                        next_batch = 0
+                        if next_epoch > cfg.epochs:
+                            print("\nPause requested at end of training.")
+                            return
+                    _save_checkpoint(
+                        model,
+                        optimizer,
+                        scheduler,
+                        global_step,
+                        next_epoch,
+                        best_val_loss,
+                        latest_path,
+                        batch_idx=next_batch,
+                    )
+                    print(
+                        f"\nTraining paused at epoch {epoch}, step {global_step}. "
+                        f"Run with --resume to continue from {latest_path}."
+                    )
+                    return
 
                 # Validation
                 if global_step % cfg.val_interval == 0:
@@ -462,6 +601,7 @@ def _save_checkpoint(
     epoch: int,
     best_loss: float,
     path: Path,
+    batch_idx: int = 0,
 ) -> None:
     torch.save(
         {
@@ -470,7 +610,9 @@ def _save_checkpoint(
             "scheduler_state_dict": scheduler.state_dict(),
             "step": step,
             "epoch": epoch,
+            "batch_idx": batch_idx,
             "best_val_loss": best_loss,
+            "rng_state": _capture_rng_state(),
             "config": {
                 "d_model": model.config.d_model,
                 "nhead": model.config.nhead,
@@ -509,6 +651,11 @@ def main():
     )
     parser.add_argument("--num_workers", type=int, default=4, help="DataLoader workers")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume from checkpoints/latest.pt if it exists",
+    )
     args = parser.parse_args()
 
     cfg = TrainConfig(
@@ -521,6 +668,7 @@ def main():
         checkpoint_dir=args.checkpoint_dir,
         num_workers=args.num_workers,
         seed=args.seed,
+        resume=args.resume,
     )
     train(cfg)
 

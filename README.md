@@ -85,10 +85,31 @@ Key flags:
 | `--device` | `cuda` | `cuda`, `cpu`, or `mps` |
 | `--checkpoint_dir` | `./checkpoints` | Checkpoint directory |
 | `--num_workers` | `4` | DataLoader workers |
+| `--resume` | `False` | Resume from `checkpoints/latest.pt` |
 
 Training logs include per-step loss, token accuracy, and periodic
 validation. Checkpoints are saved every 5 epochs and on best validation
 loss.
+
+### Pause and resume
+
+Press **Ctrl-C** during training to pause safely. The trainer finishes the
+current optimizer step and writes `checkpoints/latest.pt` containing the
+model, optimizer, scheduler, RNG state, and batch position. Press
+**Ctrl-C** a second time to force-quit without saving.
+
+To resume from the latest pause, run the same command with `--resume`:
+
+```bash
+python -m src.train \
+  --data_dir ./dataset \
+  --stats_file ./dataset/mel_stats.pt \
+  --checkpoint_dir ./checkpoints \
+  --resume
+```
+
+If `checkpoints/latest.pt` exists, training continues from the saved epoch
+and batch index; otherwise it starts from scratch.
 
 ## Inference
 
