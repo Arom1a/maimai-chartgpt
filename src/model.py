@@ -384,6 +384,15 @@ class ChartGPT(nn.Module):
                 probs = F.softmax(logits / temperature, dim=-1)
                 next_token = torch.multinomial(probs, 1).item()
 
+            name = TOKEN_BIDICT.inv.get(next_token, None)
+            if name:
+                print(f"  [{i:4d}] {next_token:g:5d}  {name}")
+            elif 75 <= next_token:g < 5075:
+                delta_ms = (next_token:g - 75) * 10
+                print(f"  [{i:4d}] {next_token:g:5d}  TIME  Δ={delta_ms}ms")
+            elif next_token:g >= 5075:
+                val = next_token:g - 5075
+                print(f"  [{i:4d}] {next_token:g:5d}  VALUE {val}")
             generated.append(next_token)
 
             # Advance validator state
