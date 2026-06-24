@@ -27,7 +27,7 @@ TARGET_SAMPLE_RATE = 16000
 MEL_HOP_LENGTH = 160  # 10 ms at 16 kHz → 100 Hz
 MEL_WIN_LENGTH = 512  # 32 ms window
 N_MELS = 80
-ENC_STRIDE = 8  # 3 × stride-2 conv blocks → 12.5 Hz
+ENC_STRIDE = 2             # 1 × stride-2 conv block → 50 Hz
 
 
 def _load_audio_ffmpeg(path: str | Path, target_sr: int = 16000) -> torch.Tensor:

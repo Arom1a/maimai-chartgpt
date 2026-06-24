@@ -18,6 +18,7 @@ wheels/
 # Training data
 dataset/*
 !dataset/placeholder
+checkpoints/
 
 # Reference files
 references/

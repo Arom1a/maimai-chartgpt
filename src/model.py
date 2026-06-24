@@ -14,7 +14,6 @@ from src.tokenizer import (
     SOS,
     VOCAB_SIZE,
     decode_time_token,
-    encode_time_token,
     is_time_token,
 )
 
@@ -27,13 +26,14 @@ from src.tokenizer import (
 @dataclass
 class ChartGPTConfig:
     d_model: int = 512
-    nhead: int = 4
-    num_decoder_layers: int = 4
+    nhead: int = 8
+    num_decoder_layers: int = 6
     dim_feedforward: int = 1024
     dropout: float = 0.1
     n_mels: int = 80
-    max_abs_time: float = 300.0  # max song duration for time embedding scale
+    max_abs_time: float = 300.0
     enable_checkpointing: bool = True
+    encoder_num_layers: int = 3
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -48,9 +48,9 @@ class SinusoidalTimeEmbedding(nn.Module):
         super().__init__()
         self.d_model = d_model
         half = d_model // 2
-        # Frequencies spaced from 1/max_time to 20 Hz so they cover the
-        # typical range of musical events (0–~200 Hz)
-        freqs = torch.logspace(math.log10(1.0 / max_time), math.log10(20.0), half)
+        freqs = torch.logspace(
+            math.log10(1.0 / max_time), math.log10(20.0), half
+        )
         self.register_buffer("freqs", freqs)
 
     def forward(self, t: torch.Tensor) -> torch.Tensor:
@@ -83,38 +83,48 @@ class SinusoidalPositionalEncoding(nn.Module):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Audio encoder
+# Audio encoder — CNN + Transformer at 50 Hz
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
 class AudioEncoder(nn.Module):
-    """Conv1d stack that downsamples mel spectrograms to ~12.5 Hz."""
+    """Shallow CNN (100→50 Hz) + Transformer for global receptive field."""
 
-    def __init__(self, n_mels: int = 128, d_model: int = 512):
+    def __init__(
+        self,
+        n_mels: int = 80,
+        d_model: int = 512,
+        nhead: int = 8,
+        num_layers: int = 3,
+        dim_feedforward: int = 1024,
+        dropout: float = 0.1,
+    ):
         super().__init__()
-        self.blocks = nn.Sequential(
-            # Block 1: 100 Hz, 128 → 256
-            nn.Conv1d(n_mels, 256, kernel_size=3, padding=1, stride=1),
+        self.cnn = nn.Sequential(
+            nn.Conv1d(n_mels, 256, kernel_size=5, stride=1, padding=2),
             nn.BatchNorm1d(256),
             nn.ReLU(inplace=True),
-            # Block 2: 50 Hz, 256 → 512
-            nn.Conv1d(256, 512, kernel_size=3, padding=1, stride=2),
-            nn.BatchNorm1d(512),
-            nn.ReLU(inplace=True),
-            # Block 3: 25 Hz, 512 → 512
-            nn.Conv1d(512, 512, kernel_size=3, padding=1, stride=2),
-            nn.BatchNorm1d(512),
-            nn.ReLU(inplace=True),
-            # Block 4: 12.5 Hz, 512 → d_model
-            nn.Conv1d(512, d_model, kernel_size=3, padding=1, stride=2),
+            nn.Conv1d(256, d_model, kernel_size=5, stride=2, padding=2),
             nn.BatchNorm1d(d_model),
             nn.ReLU(inplace=True),
         )
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=nhead,
+            dim_feedforward=dim_feedforward,
+            dropout=dropout,
+            batch_first=True,
+        )
+        self.transformer = nn.TransformerEncoder(
+            encoder_layer, num_layers=num_layers
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """*x*: ``(B, n_mels, T)`` → ``(B, T_enc, d_model)``"""
-        x = self.blocks(x)
-        return x.transpose(1, 2)
+        """*x*: ``(B, n_mels, T_100Hz)`` → ``(B, T_50Hz, d_model)``"""
+        x = self.cnn(x)
+        x = x.transpose(1, 2)
+        x = self.transformer(x)
+        return x
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -129,9 +139,16 @@ class ChartGPT(nn.Module):
         self.config = config
 
         # ── Encoder ────────────────────────────────────────────────────
-        self.audio_encoder = AudioEncoder(n_mels=config.n_mels, d_model=config.d_model)
+        self.audio_encoder = AudioEncoder(
+            n_mels=config.n_mels,
+            d_model=config.d_model,
+            nhead=config.nhead,
+            num_layers=config.encoder_num_layers,
+            dim_feedforward=config.dim_feedforward,
+            dropout=config.dropout,
+        )
         self.bpm_proj = nn.Linear(1, config.d_model)
-        self.const_emb = nn.Embedding(200, config.d_model)  # 0..199 covers 0.0-19.9
+        self.const_emb = nn.Embedding(200, config.d_model)
 
         # ── Decoder ────────────────────────────────────────────────────
         self.token_emb = nn.Embedding(VOCAB_SIZE, config.d_model)
@@ -170,13 +187,12 @@ class ChartGPT(nn.Module):
 
         Returns
         -------
-        ``(B, T_enc, d_model)``
+        ``(B, T_enc, d_model)`` at 50 Hz.
         """
-        # Audio features
         enc_out = self.audio_encoder(spectrogram)  # (B, T_enc, d_model)
         T_enc = enc_out.shape[1]
 
-        # BPM conditioning – interpolate from 100 Hz → encoder frame rate
+        # BPM conditioning — interpolate from 100 Hz → 50 Hz encoder rate
         bpm_cond = self.bpm_proj(bpm_signal.unsqueeze(-1))  # (B, T_spec, d_model)
         bpm_cond = F.interpolate(
             bpm_cond.transpose(1, 2),
@@ -220,13 +236,6 @@ class ChartGPT(nn.Module):
         ``(dec_out, targets)``
             dec_out: ``(B, L-1, d_model)`` — raw decoder output (no projection).
             targets: ``(B, L-1)`` — shifted right by 1 from *target_tokens*.
-
-        Notes
-        -----
-        The output projection to vocabulary size is **not** applied here.
-        Call :meth:`compute_logits_chunk` or iterate over
-        ``model.output_head(dec_out[:, start:end])`` in chunks to avoid
-        materialising the giant ``(B, L, 13267)`` tensor on GPU.
         """
         B = spectrogram.shape[0]
 
@@ -250,7 +259,9 @@ class ChartGPT(nn.Module):
         # Embeddings
         tok_emb = self.token_emb(dec_input)  # (B, L-1, d_model)
         time_emb = self.abs_time_emb(dec_abs_times.unsqueeze(-1))  # (B, L-1, d_model)
-        positions = torch.arange(dec_input.shape[1], device=dec_input.device).unsqueeze(0)
+        positions = torch.arange(
+            dec_input.shape[1], device=dec_input.device
+        ).unsqueeze(0)
         pos_emb = self.pos_enc(positions)  # (1, L-1, d_model)
 
         tgt_emb = tok_emb + time_emb + pos_emb  # (B, L-1, d_model)
@@ -260,12 +271,14 @@ class ChartGPT(nn.Module):
         if tok_mask is not None:
             tgt_key_padding_mask = tok_mask[:, :-1]
 
-        # Explicit causal bool mask.  PyTorch SDPA detects the triangular
-        # pattern and dispatches to Flash Attention / Memory-Efficient
-        # Attention on CUDA without materialising the full (L, L) matrix.
+        # Explicit causal bool mask.
         tgt_mask = torch.triu(
-            torch.ones(dec_input.shape[1], dec_input.shape[1],
-                       device=dec_input.device, dtype=torch.bool),
+            torch.ones(
+                dec_input.shape[1],
+                dec_input.shape[1],
+                device=dec_input.device,
+                dtype=torch.bool,
+            ),
             diagonal=1,
         )
 
@@ -276,11 +289,11 @@ class ChartGPT(nn.Module):
                 tgt_emb,
                 memory,
                 tgt_mask,
-                None,  # memory_mask
+                None,
                 tgt_key_padding_mask,
                 memory_key_padding_mask,
-                None,  # tgt_is_causal
-                False,  # memory_is_causal
+                None,
+                False,
                 use_reentrant=False,
             )
         else:
@@ -304,7 +317,8 @@ class ChartGPT(nn.Module):
         *,
         max_len: int = 8000,
         temperature: float = 1.0,
-        validator=None,  # Optional[ChartValidator]
+        validator=None,
+        song_end_ms: Optional[float] = None,
     ) -> List[int]:
         """Autoregressively generate a token sequence for one song.
 
@@ -318,8 +332,11 @@ class ChartGPT(nn.Module):
         temperature : float
             Softmax temperature.  ``0.0`` → greedy argmax.
         validator : ChartValidator or None
-            If provided, invalid tokens are masked before sampling so the
-            output stream is guaranteed syntactically valid.
+            If provided, invalid tokens are masked before sampling.
+        song_end_ms : float or None
+            If set, generation is hard‑capped when the accumulated song
+            time exceeds this value — the EOS token is forced at the
+            next valid grammar state.
 
         Returns
         -------
@@ -331,18 +348,17 @@ class ChartGPT(nn.Module):
 
         # Encode once
         memory = self._encode(spectrogram, bpm_signal, chart_constant)
-        # (1, T_enc, d_model) → (T_enc, 1, d_model) for decoder
 
         generated = [SOS]
 
-        # Pre-seeded SOS must be consumed by the validator before the loop
-        # so the FSM starts at EXPECT_TIME, not EXPECT_SOS.
         if validator is not None:
             validator.advance(SOS)
 
         for _ in range(max_len):
             L = len(generated)
-            tgt_tensor = torch.tensor([generated], device=device, dtype=torch.long)
+            tgt_tensor = torch.tensor(
+                [generated], device=device, dtype=torch.long
+            )
 
             # Compute absolute times for all positions
             cur = 0.0
@@ -351,6 +367,7 @@ class ChartGPT(nn.Module):
                 if is_time_token(tok):
                     cur += decode_time_token(tok) / 1000.0
                 abs_times[0, i, 0] = cur
+            current_time_ms = cur * 1000.0
 
             # Embeddings
             tok_emb = self.token_emb(tgt_tensor)
@@ -372,9 +389,19 @@ class ChartGPT(nn.Module):
             # Last position logits
             logits = self.output_head(dec_out[:, -1, :]).squeeze(0)  # (V,)
 
-            # Mask syntactically invalid tokens if validator is provided
+            # Mask syntactically invalid tokens
             if validator is not None:
                 mask = validator.valid_mask(device=device)
+
+                # Hard-cap EOS when song time exceeds song_end_ms
+                if (
+                    song_end_ms is not None
+                    and current_time_ms >= song_end_ms
+                    and mask[EOS]
+                ):
+                    mask = torch.zeros_like(mask)
+                    mask[EOS] = True
+
                 if mask.any():
                     logits[~mask] = float("-inf")
 
@@ -384,18 +411,8 @@ class ChartGPT(nn.Module):
                 probs = F.softmax(logits / temperature, dim=-1)
                 next_token = torch.multinomial(probs, 1).item()
 
-            name = TOKEN_BIDICT.inv.get(next_token, None)
-            if name:
-                print(f"  [{i:4d}] {next_token:g:5d}  {name}")
-            elif 75 <= next_token:g < 5075:
-                delta_ms = (next_token:g - 75) * 10
-                print(f"  [{i:4d}] {next_token:g:5d}  TIME  Δ={delta_ms}ms")
-            elif next_token:g >= 5075:
-                val = next_token:g - 5075
-                print(f"  [{i:4d}] {next_token:g:5d}  VALUE {val}")
             generated.append(next_token)
 
-            # Advance validator state
             if validator is not None:
                 validator.advance(next_token)
 

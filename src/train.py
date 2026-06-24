@@ -37,8 +37,8 @@ class TrainConfig:
 
     # Model
     d_model: int = 512
-    nhead: int = 4
-    num_decoder_layers: int = 4
+    nhead: int = 8
+    num_decoder_layers: int = 6
     dim_feedforward: int = 1024
     dropout: float = 0.1
 

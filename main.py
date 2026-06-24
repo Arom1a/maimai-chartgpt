@@ -238,6 +238,7 @@ examples:
     # ── Generate ────────────────────────────────────────────────────────
     validator = ChartValidator(bpm10_list)
     const_tensor = torch.tensor([chart_const], dtype=torch.long, device=device)
+    song_end_ms = mel_spec.shape[2] * 10  # each mel frame = 10 ms
 
     print(f"Generating (max {args.max_tokens} tokens, "
           f"temperature={args.temperature})…")
@@ -251,6 +252,7 @@ examples:
             max_len=args.max_tokens,
             temperature=args.temperature,
             validator=validator,
+            song_end_ms=song_end_ms,
         )
 
     elapsed = time.perf_counter() - t0
