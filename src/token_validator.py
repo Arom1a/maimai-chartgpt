@@ -5,6 +5,7 @@ from typing import List, Optional, Set, Tuple
 import torch
 
 from src.tokenizer import (
+    CC,
     DECO_BREAK,
     DECO_EX,
     DECO_FIREWORK,
@@ -12,10 +13,13 @@ from src.tokenizer import (
     DIV,
     DUR_ABS,
     DUR_SYM,
+    END_ONSET,
     EON,
     EOS,
     KIND_TOKENS,
+    MAX_DELTA_BINS,
     MUL,
+    ONSET,
     POS_TO_ID,
     SEG,
     SEG_END,
@@ -23,10 +27,12 @@ from src.tokenizer import (
     SLIDE_DECO_BREAK,
     SLIDE_DECO_NONE,
     SOS,
+    STAGE2_VOCAB_SIZE,
     TIME_OFFSET_BASE,
     VALUE_BASE,
     VOCAB_SIZE,
     WAIT,
+    TOKEN_BIDICT,
     is_time_token,
     is_value_token,
 )
@@ -551,6 +557,435 @@ class ChartValidator:
             )
 
         raise ValueError(f"Unknown dur choice: {choice}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Stage2Validator — FSM for block-format token sequences
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class Stage2Validator:
+    """Finite‑state machine for stage‑2 block‑format token validation.
+
+    Handles the ``<SOS> <CC> <ONSET> … <END_ONSET> … <EOS>`` format.
+    Note‑level validation within onset blocks is delegated to an internal
+    ``ChartValidator`` (skipping time‑offset phases).
+    """
+
+    # Phase constants (subset of ChartValidator phases, re‑used)
+    _PH_WAITS_NOTE_START = "waits_note_start"
+    _PH_WAITS_KIND = "waits_kind"
+    _PH_WAITS_POS = "waits_pos"
+    _PH_WAITS_DECO = "waits_deco"
+    _PH_WAITS_WAIT = "waits_wait"
+    _PH_WAITS_DUR = "waits_dur"
+    _PH_WAITS_SLIDE = "waits_slide"
+    _PH_WAITS_SLIDE_DECO = "waits_slide_deco"
+    _PH_WAITS_EON = "waits_eon"
+
+    _BLOCK_PHASES = {
+        _PH_WAITS_NOTE_START,
+        _PH_WAITS_KIND,
+        _PH_WAITS_POS,
+        _PH_WAITS_DECO,
+        _PH_WAITS_WAIT,
+        _PH_WAITS_DUR,
+        _PH_WAITS_SLIDE,
+        _PH_WAITS_SLIDE_DECO,
+        _PH_WAITS_EON,
+    }
+
+    def __init__(self, bpm10_list: Optional[List[dict]] = None) -> None:
+        self._bpm10_list = bpm10_list
+        self._reset()
+
+    def _reset(self) -> None:
+        self._phase = "waits_sos"  # top-level: waits_sos | waits_cc | waits_onset_or_eos | done
+        self._kind_id: Optional[int] = None
+        self._note_pos: Optional[str] = None
+        self._note_decos: List[int] = []
+        self._wait_emitted = False
+        self._dur_started = False
+        self._dur_was_wait = False  # True when the current dur is for a WAIT
+        self._dur_choice: Optional[int] = None
+        self._dur_sub = 0
+        self._slide_seg_idx = 0
+        self._slide_first_seg_end: Optional[str] = None
+        self._slide_first_seg_shape: Optional[str] = None
+        self._prev_seg_end: Optional[str] = None
+        self._seg_is_reflect = False
+
+    # ── valid_mask ───────────────────────────────────────────────────────
+
+    def valid_mask(self, device: Optional["torch.device"] = None) -> "torch.Tensor":
+        """Return boolean tensor of shape ``(STAGE2_VOCAB_SIZE,)``."""
+        import torch
+
+        mask = torch.zeros(STAGE2_VOCAB_SIZE, dtype=torch.bool, device=device or "cpu")
+
+        if self._phase == "waits_sos":
+            mask[SOS] = True
+        elif self._phase == "waits_cc":
+            mask[CC] = True
+        elif self._phase == "waits_onset_or_eos":
+            mask[ONSET] = True
+            mask[EOS] = True
+        elif self._phase == "done":
+            pass
+        elif self._phase in self._BLOCK_PHASES:
+            self._fill_note_mask(mask)
+        return mask
+
+    def _fill_note_mask(self, mask: "torch.Tensor") -> None:
+        """Fill *mask* for the current note‑parsing phase."""
+        if self._phase == self._PH_WAITS_NOTE_START:
+            # Start of a new note in current onset block: must be a kind
+            for k_id in KIND_TOKENS.values():
+                mask[k_id] = True
+            mask[END_ONSET] = True  # block can end with zero notes
+        elif self._phase == self._PH_WAITS_KIND:
+            raise RuntimeError("waits_kind is merged into waits_note_start")
+        elif self._phase == self._PH_WAITS_POS:
+            assert self._kind_id is not None
+            valid_pos = _VALID_POS[_inv_name_from_kind(self._kind_id)]
+            for p_id in valid_pos:
+                mask[p_id] = True
+        elif self._phase == self._PH_WAITS_DECO:
+            mask[DECO_BREAK] = True
+            mask[DECO_EX] = True
+            mask[DECO_FIREWORK] = True
+            # Can stop decorations here → proceed to next phase
+            mask[DECO_NONE] = True
+            # Allow shortcuts (skip deco phase entirely)
+            self._fill_post_deco_mask(mask)
+        elif self._phase == self._PH_WAITS_WAIT:
+            mask[WAIT] = True
+            self._fill_post_wait_mask(mask)
+        elif self._phase == self._PH_WAITS_DUR:
+            if self._dur_choice is None:
+                mask[DUR_ABS] = True
+                mask[DUR_SYM] = True
+            elif self._dur_choice == DUR_ABS:
+                mask[TIME_OFFSET_BASE:TIME_OFFSET_BASE + MAX_DELTA_BINS] = True
+            elif self._dur_choice == DUR_SYM:
+                if self._dur_sub == 0:
+                    mask[DIV] = True
+                elif self._dur_sub == 1:
+                    mask[VALUE_BASE:VALUE_BASE + MAX_VALUE] = True
+                elif self._dur_sub == 2:
+                    mask[MUL] = True
+                elif self._dur_sub == 3:
+                    mask[VALUE_BASE:VALUE_BASE + MAX_VALUE] = True
+                elif self._dur_sub in (4, 5):
+                    self._fill_post_dur_mask(mask)
+            elif self._dur_choice is not None:
+                self._fill_post_dur_mask(mask)
+        elif self._phase == self._PH_WAITS_SLIDE:
+            mask[SEG] = True
+            if self._slide_seg_idx == 0:
+                for s_id in SHAPES.values():
+                    mask[s_id] = True
+            else:
+                # subsequent segments: any shape that can chain
+                prev_shape = self._slide_first_seg_shape or ""
+                for s_id in SHAPES.values():
+                    shape_name = _SHAPE_INV[s_id]
+                    if shape_name == "Wifi":
+                        continue  # Wifi can't appear after the first segment
+                    mask[s_id] = True
+            mask[SEG_END] = True
+        elif self._phase == self._PH_WAITS_SLIDE_DECO:
+            mask[SLIDE_DECO_BREAK] = True
+            mask[SLIDE_DECO_NONE] = True
+            self._fill_post_slide_deco_mask(mask)
+        elif self._phase == self._PH_WAITS_EON:
+            mask[EON] = True
+            mask[END_ONSET] = True
+            mask[EOS] = True
+
+    def _fill_post_deco_mask(self, mask: "torch.Tensor") -> None:
+        kind_name = _inv_name_from_kind(self._kind_id) if self._kind_id else ""
+        if kind_name in ("Hold", "Slide", "TouchHold"):
+            mask[DUR_ABS] = True
+            mask[DUR_SYM] = True
+        if kind_name == "Slide":
+            mask[WAIT] = True
+            for s_id in SHAPES.values():
+                mask[s_id] = True
+        mask[EON] = True
+        mask[END_ONSET] = True
+
+    def _fill_post_wait_mask(self, mask: "torch.Tensor") -> None:
+        kind_name = _inv_name_from_kind(self._kind_id) if self._kind_id else ""
+        if kind_name in ("Hold", "Slide", "TouchHold"):
+            mask[DUR_ABS] = True
+            mask[DUR_SYM] = True
+        if kind_name == "Slide":
+            for s_id in SHAPES.values():
+                mask[s_id] = True
+        mask[EON] = True
+        mask[END_ONSET] = True
+
+    def _fill_post_dur_mask(self, mask: "torch.Tensor") -> None:
+        kind_name = _inv_name_from_kind(self._kind_id) if self._kind_id else ""
+        if kind_name == "Slide":
+            for s_id in SHAPES.values():
+                mask[s_id] = True
+        mask[EON] = True
+        mask[END_ONSET] = True
+
+    def _fill_post_slide_deco_mask(self, mask: "torch.Tensor") -> None:
+        mask[EON] = True
+        mask[END_ONSET] = True
+
+    # ── advance ──────────────────────────────────────────────────────────
+
+    def advance(self, token_id: int) -> None:
+        if self._phase == "waits_sos":
+            if token_id != SOS:
+                raise ValueError(f"Expected SOS at start, got {token_id}")
+            self._phase = "waits_cc"
+        elif self._phase == "waits_cc":
+            if token_id != CC:
+                raise ValueError(f"Expected CC after SOS, got {token_id}")
+            self._phase = "waits_onset_or_eos"
+        elif self._phase == "waits_onset_or_eos":
+            if token_id == EOS:
+                self._phase = "done"
+            elif token_id == ONSET:
+                self._phase = self._PH_WAITS_NOTE_START
+                self._reset_note_state()
+            else:
+                raise ValueError(f"Expected ONSET or EOS, got {token_id}")
+        elif self._phase == "done":
+            raise ValueError("Token after EOS")
+        else:
+            self._advance_note(token_id)
+
+    def _reset_note_state(self) -> None:
+        self._kind_id = None
+        self._note_pos = None
+        self._note_decos = []
+        self._wait_emitted = False
+        self._dur_started = False
+        self._dur_was_wait = False
+        self._dur_choice = None
+        self._dur_sub = 0
+        self._slide_seg_idx = 0
+        self._slide_first_seg_end = None
+        self._slide_first_seg_shape = None
+        self._prev_seg_end = None
+        self._seg_is_reflect = False
+
+    def _advance_note(self, token_id: int) -> None:
+        # EON / END_ONSET / EOS can terminate a note at almost any phase
+        if token_id == EON:
+            self._phase = self._PH_WAITS_NOTE_START
+            self._reset_note_state()
+            return
+        if token_id == END_ONSET:
+            self._phase = "waits_onset_or_eos"
+            self._reset_note_state()
+            return
+        if token_id == EOS:
+            self._phase = "done"
+            return
+
+        if self._phase == self._PH_WAITS_NOTE_START:
+            if token_id == END_ONSET:
+                self._phase = "waits_onset_or_eos"
+                return
+            if token_id not in KIND_TOKENS.values():
+                raise ValueError(
+                    f"Expected note kind or END_ONSET, got {token_id}"
+                )
+            self._kind_id = token_id
+            self._phase = self._PH_WAITS_POS
+        elif self._phase == self._PH_WAITS_POS:
+            kind_name = _inv_name_from_kind(self._kind_id)
+            valid = _VALID_POS[kind_name]
+            if token_id not in valid:
+                raise ValueError(
+                    f"Invalid position {token_id} for {kind_name}"
+                )
+            self._note_pos = TOKEN_BIDICT.inv[token_id].removeprefix("POS_")
+            self._phase = self._PH_WAITS_DECO
+        elif self._phase == self._PH_WAITS_DECO:
+            if token_id == DECO_NONE:
+                self._phase = self._PH_WAITS_WAIT
+            elif token_id in _DECO_PRIORITY:
+                self._note_decos.append(token_id)
+                # stay in DECO phase (may have more decos)
+            elif token_id == EON or token_id == END_ONSET:
+                self._phase = self._PH_WAITS_WAIT
+                self.advance(token_id)  # re‑enter to handle
+            elif token_id in (DUR_ABS, DUR_SYM):
+                self._phase = self._PH_WAITS_WAIT
+                self.advance(token_id)
+            elif token_id == WAIT:
+                self._phase = self._PH_WAITS_WAIT
+                self.advance(token_id)
+            elif token_id in SHAPES.values():
+                self._phase = self._PH_WAITS_WAIT
+                self.advance(token_id)
+            else:
+                raise ValueError(
+                    f"Unexpected token {token_id} in deco phase"
+                )
+        elif self._phase == self._PH_WAITS_WAIT:
+            kind_name = _inv_name_from_kind(self._kind_id)
+            if token_id == WAIT and not self._wait_emitted:
+                self._wait_emitted = True
+                self._dur_was_wait = True
+                self._dur_choice = None
+                self._dur_sub = 0
+                self._phase = self._PH_WAITS_DUR
+            elif token_id in (DUR_ABS, DUR_SYM):
+                self._phase = self._PH_WAITS_DUR
+                self.advance(token_id)
+            elif token_id in SHAPES.values():
+                self._phase = self._PH_WAITS_SLIDE
+                self.advance(token_id)
+            elif token_id == EON or token_id == END_ONSET:
+                self._phase = "waits_onset_or_eos"
+                # If END_ONSET: done with this onset block
+                # If EON: back to waits_note_start for next note in block
+                if token_id == EON:
+                    self._phase = self._PH_WAITS_NOTE_START
+                # When END_ONSET → back to waits_onset_or_eos
+            elif kind_name not in ("Hold", "Slide", "TouchHold"):
+                raise ValueError(
+                    f"Unexpected token {token_id} in wait phase for {kind_name}"
+                )
+            else:
+                raise ValueError(
+                    f"Unexpected token {token_id} in wait phase"
+                )
+        elif self._phase == self._PH_WAITS_DUR:
+            if self._dur_choice is None:
+                if token_id in (DUR_ABS, DUR_SYM):
+                    self._dur_choice = token_id
+                    self._dur_sub = 0
+                else:
+                    raise ValueError(
+                        f"Expected DUR_ABS or DUR_SYM, got {token_id}"
+                    )
+            elif self._dur_choice == DUR_ABS:
+                if is_time_token(token_id):
+                    if self._dur_was_wait:
+                        self._dur_was_wait = False
+                        self._dur_choice = None
+                        self._dur_sub = 0
+                        self._phase = self._PH_WAITS_WAIT
+                    else:
+                        self._phase = self._PH_WAITS_SLIDE
+                else:
+                    raise ValueError(
+                        f"Expected time token, got {token_id}"
+                    )
+            elif self._dur_choice == DUR_SYM:
+                if self._dur_sub == 0:
+                    if token_id == DIV:
+                        self._dur_sub = 1
+                    else:
+                        raise ValueError(f"Expected DIV, got {token_id}")
+                elif self._dur_sub == 1:
+                    if is_value_token(token_id):
+                        self._dur_sub = 2
+                    else:
+                        raise ValueError(
+                            f"Expected value token, got {token_id}"
+                        )
+                elif self._dur_sub == 2:
+                    if token_id == MUL:
+                        self._dur_sub = 3
+                    else:
+                        raise ValueError(f"Expected MUL, got {token_id}")
+                elif self._dur_sub == 3:
+                    if is_value_token(token_id):
+                        self._dur_sub = 4
+                        if self._dur_was_wait:
+                            self._dur_was_wait = False
+                            self._dur_choice = None
+                            self._dur_sub = 0
+                            self._phase = self._PH_WAITS_WAIT
+                        else:
+                            self._phase = self._PH_WAITS_SLIDE
+                    else:
+                        raise ValueError(
+                            f"Expected value token, got {token_id}"
+                        )
+        elif self._phase == self._PH_WAITS_SLIDE:
+            if token_id == SEG_END:
+                self._phase = self._PH_WAITS_SLIDE_DECO
+            elif token_id == SEG:
+                # Start of a new segment — stay in slide phase, next token is shape
+                pass
+            elif token_id in SHAPES.values():
+                shape = _SHAPE_INV[token_id]
+                if shape == "Wifi" and self._slide_seg_idx > 0:
+                    raise ValueError("Wifi can only be the first segment")
+                self._slide_seg_idx += 1
+                if self._slide_seg_idx == 1:
+                    self._slide_first_seg_shape = shape
+                # Seg parsing continues in waits_slide — the seg start is done
+                # Now wait for position token (seg end or reflect position)
+                self._seg_is_reflect = (shape == "Reflect")
+                if self._seg_is_reflect:
+                    # stay in slide phase, next is reflect_pos
+                    pass
+                else:
+                    # stay in slide phase, next is end_pos
+                    pass
+            elif token_id in POS_TO_ID.values():
+                if self._seg_is_reflect and self._prev_seg_end is None:
+                    # This is the reflect position, not the end
+                    self._seg_is_reflect = False
+                    # Next token should be the end position
+                else:
+                    pos_name = TOKEN_BIDICT.inv[token_id].removeprefix("POS_")
+                    self._prev_seg_end = pos_name
+                    if self._slide_seg_idx == 1:
+                        self._slide_first_seg_end = pos_name
+                    self._seg_is_reflect = False
+            else:
+                raise ValueError(
+                    f"Unexpected token {token_id} in slide phase"
+                )
+        elif self._phase == self._PH_WAITS_SLIDE_DECO:
+            if token_id == SLIDE_DECO_NONE:
+                self._phase = self._PH_WAITS_EON
+            elif token_id == SLIDE_DECO_BREAK:
+                self._phase = self._PH_WAITS_EON
+            elif token_id == EON:
+                self._phase = self._PH_WAITS_NOTE_START
+            elif token_id == END_ONSET:
+                self._phase = "waits_onset_or_eos"
+            else:
+                raise ValueError(
+                    f"Unexpected token {token_id} in slide deco phase"
+                )
+        elif self._phase == self._PH_WAITS_EON:
+            if token_id == EON:
+                self._phase = self._PH_WAITS_NOTE_START
+            elif token_id == END_ONSET:
+                self._phase = "waits_onset_or_eos"
+            elif token_id == EOS:
+                self._phase = "done"
+            else:
+                raise ValueError(
+                    f"Expected EON, END_ONSET, or EOS, got {token_id}"
+                )
+
+
+def _inv_name_from_kind(kind_id: int) -> str:
+    for k, v in KIND_TOKENS.items():
+        if v == kind_id:
+            return k
+    raise ValueError(f"Unknown kind token: {kind_id}")
+
+
+_SHAPE_INV = {v: k for k, v in SHAPES.items()}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

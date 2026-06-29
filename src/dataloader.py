@@ -14,8 +14,10 @@ from tqdm import tqdm
 
 from src.tokenizer import (
     PAD,
+    STAGE2_VOCAB_SIZE,
     VOCAB_SIZE,
     ChartTokenizer,
+    compute_abs_times_stage2,
     decode_time_token,
     encode_time_token,
     is_time_token,
@@ -253,6 +255,10 @@ class MaiMaiDataset(Dataset):
             for f in range(max(0, frame - 1), min(T_spec, frame + 2)):
                 onset_labels[f] = 1.0
 
+        # ── Stage 2 tokens (block format) ─────────────────────────────────
+        tokens_s2, onset_times_s2 = tokenizer.encode_notes_stage2(chart["notes"])
+        abs_times_s2 = compute_abs_times_stage2(tokens_s2, onset_times_s2)
+
         return {
             "spectrogram": mel_spec,  # (n_mels, T_spec)
             "bpm_signal": bpm_signal,  # (T_spec,)
@@ -260,6 +266,9 @@ class MaiMaiDataset(Dataset):
             "chart_constant": torch.tensor(chart_const, dtype=torch.long),
             "abs_times": abs_times,  # (len(tokens),)
             "onset_labels": onset_labels,  # (T_spec,)
+            "tokens_stage2": torch.tensor(tokens_s2, dtype=torch.long),
+            "abs_times_stage2": torch.tensor(abs_times_s2, dtype=torch.float32),
+            "onset_times_ms_stage2": torch.tensor(onset_times_s2, dtype=torch.float32),
         }
 
 
@@ -324,6 +333,75 @@ def collate_fn(batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
         "onset_labels": torch.stack(onsets),  # (B, T_spec_max)
         "spec_mask": torch.stack(spec_masks),  # (B, T_spec_max)
         "tok_mask": torch.stack(tok_masks),  # (B, L_max)
+    }
+
+
+def collate_fn_stage2(
+    batch: List[Dict[str, torch.Tensor]],
+) -> Dict[str, torch.Tensor]:
+    """Pad all sequences for stage‑2 training (block‑format tokens).
+
+    ``onset_times_ms_stage2`` is returned as a tuple of 1‑D tensors
+    (not padded) so the trainer can reconstruct per‑sample onset lists.
+    """
+    n_mels = batch[0]["spectrogram"].shape[0]
+    max_spec_len = max(item["spectrogram"].shape[1] for item in batch)
+    max_tok_s2_len = max(item["tokens_stage2"].shape[0] for item in batch)
+
+    specs = []
+    bpms = []
+    tokens_s2 = []
+    consts = []
+    ts_s2 = []
+    onsets = []
+    spec_masks = []
+    tok_s2_masks = []
+    onset_ms_list = []
+
+    for item in batch:
+        sl = item["spectrogram"].shape[1]
+        tl = item["tokens_stage2"].shape[0]
+
+        spec_pad = max_spec_len - sl
+        tok_pad = max_tok_s2_len - tl
+
+        specs.append(F.pad(item["spectrogram"], (0, spec_pad)))
+        bpms.append(F.pad(item["bpm_signal"], (0, spec_pad)))
+        tokens_s2.append(
+            F.pad(item["tokens_stage2"], (0, tok_pad), value=PAD)
+        )
+        ts_s2.append(F.pad(item["abs_times_stage2"], (0, tok_pad)))
+        onsets.append(F.pad(item["onset_labels"], (0, spec_pad)))
+        consts.append(item["chart_constant"])
+
+        spec_masks.append(
+            torch.cat(
+                [
+                    torch.zeros(sl, dtype=torch.bool),
+                    torch.ones(spec_pad, dtype=torch.bool),
+                ]
+            )
+        )
+        tok_s2_masks.append(
+            torch.cat(
+                [
+                    torch.zeros(tl, dtype=torch.bool),
+                    torch.ones(tok_pad, dtype=torch.bool),
+                ]
+            )
+        )
+        onset_ms_list.append(item["onset_times_ms_stage2"])
+
+    return {
+        "spectrogram": torch.stack(specs),
+        "bpm_signal": torch.stack(bpms),
+        "tokens_stage2": torch.stack(tokens_s2),
+        "chart_constant": torch.stack(consts),
+        "abs_times_stage2": torch.stack(ts_s2),
+        "onset_labels": torch.stack(onsets),
+        "onset_times_ms_stage2": tuple(onset_ms_list),
+        "spec_mask": torch.stack(spec_masks),
+        "tok_mask": torch.stack(tok_s2_masks),
     }
 
 

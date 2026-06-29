@@ -94,12 +94,21 @@ MAX_VALUE = 8192
 # ── Total vocabulary size ─────────────────────────────────────────────────────
 VOCAB_SIZE = VALUE_BASE + MAX_VALUE  # 5075 + 8192 = 13267
 
+# ── Stage-2 block-format tokens ────────────────────────────────────────────────
+CC = VOCAB_SIZE  # 13267 – chart constant placeholder
+ONSET = VOCAB_SIZE + 1  # 13268 – marks a group of notes at one timestamp
+END_ONSET = VOCAB_SIZE + 2  # 13269 – ends the group
+STAGE2_VOCAB_SIZE = VOCAB_SIZE + 3  # 13270
+
 # ── Token name -> ID lookup (built once) ──────────────────────────────────────
 _TOKEN_NAMES: Dict[str, int] = {
     "PAD": PAD,
     "SOS": SOS,
     "EOS": EOS,
     "EON": EON,
+    "CC": CC,
+    "ONSET": ONSET,
+    "END_ONSET": END_ONSET,
     **{f"KIND_{k}": v for k, v in KIND_TOKENS.items()},
     **{f"POS_{p}": i for p, i in POS_TO_ID.items()},
     "DECO_NONE": DECO_NONE,
@@ -151,6 +160,34 @@ def decode_value_token(token_id: int) -> int:
 def encode_value_token(value: int) -> int:
     value = max(0, min(value, MAX_VALUE - 1))
     return VALUE_BASE + value
+
+
+def compute_abs_times_stage2(
+    tokens: List[int], onset_times_ms: List[int]
+) -> List[float]:
+    """Compute absolute song time (seconds) for each token in a stage‑2 sequence.
+
+    ``<SOS>`` and ``<CC>`` get time 0.  Each ``<ONSET>`` and all
+    following tokens up to ``<END_ONSET>`` get the onset time.
+    ``<EOS>`` gets the last onset time.
+    """
+    times: List[float] = []
+    onset_idx = 0
+    cur_time = 0.0
+
+    for tok in tokens:
+        if tok == ONSET:
+            cur_time = (
+                onset_times_ms[onset_idx] / 1000.0
+                if onset_idx < len(onset_times_ms)
+                else cur_time
+            )
+            onset_idx += 1
+        elif tok in (SOS, CC):
+            cur_time = 0.0
+        times.append(cur_time)
+
+    return times
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -472,11 +509,222 @@ class ChartTokenizer:
 
         return notes
 
+    # ── Stage 2 block-format encode / decode ────────────────────────────
+
+    def encode_notes_stage2(self, notes: List[Dict]) -> Tuple[List[int], List[int]]:
+        """Encode notes into stage‑2 block format.
+
+        Returns ``(tokens, onset_times_ms)``.  *tokens* contains the
+        ``<SOS> <CC> <ONSET> … <END_ONSET> … <EOS>`` sequence and
+        *onset_times_ms* gives the absolute timestamp of each ``<ONSET>``.
+        """
+        tokens: List[int] = [SOS, CC]
+        onset_times_ms: List[int] = []
+
+        groups: Dict[int, List[Dict]] = {}
+        for note in notes:
+            ts = round(note["timestamp_ms"] / 10.0) * 10
+            groups.setdefault(ts, []).append(note)
+
+        sorted_onsets = sorted(groups.keys())
+
+        for onset_ms in sorted_onsets:
+            onset_times_ms.append(onset_ms)
+            tokens.append(ONSET)
+
+            group_notes = groups[onset_ms]
+            for j, note in enumerate(group_notes):
+                cur_ms = onset_ms
+
+                # Kind
+                tokens.append(KIND_TOKENS[note["kind"]])
+                # Position
+                tokens.append(POS_TO_ID[note["pos"]])
+                # Decorations (sorted: Break, Ex, Firework)
+                decos = sorted(note["deco"], key=lambda d: DECO_SORT_ORDER.index(d))
+                if not decos:
+                    tokens.append(DECO_NONE)
+                else:
+                    for d in decos:
+                        tokens.append(DECO_NAMES[d])
+                # Wait (Slide only; emit only if explicit ≠ default)
+                if note["kind"] == "Slide":
+                    wait_expr = note.get("wait")
+                    if wait_expr is not None:
+                        explicit_ms = self._duration_expr_to_ms(wait_expr, cur_ms)
+                        default_ms = self._default_wait_ms(cur_ms)
+                        if round(explicit_ms / 10.0) != round(default_ms / 10.0):
+                            tokens.append(WAIT)
+                            self._encode_duration(tokens, wait_expr)
+                # Duration (Hold, TouchHold, Slide)
+                if note["kind"] in ("Hold", "Slide", "TouchHold"):
+                    self._encode_duration(tokens, note["duration"])
+                # Slide segments
+                if note["kind"] == "Slide":
+                    for seg in note["slide_segments"]:
+                        tokens.append(SEG)
+                        shape = seg["shape"]
+                        if isinstance(shape, dict):
+                            tokens.append(SHAPES["Reflect"])
+                            tokens.append(POS_TO_ID[shape["Reflect"]])
+                        else:
+                            tokens.append(SHAPES[shape])
+                        tokens.append(POS_TO_ID[seg["end"]])
+                    tokens.append(SEG_END)
+                    # Slide decorations
+                    slide_decos = sorted(
+                        note.get("slide_deco", []),
+                        key=lambda d: 0 if d == "Break" else 1,
+                    )
+                    if not slide_decos:
+                        tokens.append(SLIDE_DECO_NONE)
+                    else:
+                        for sd in slide_decos:
+                            tokens.append(SLIDE_DECO_NAMES[sd])
+                # End-of-note (EON for all except last in group)
+                if j < len(group_notes) - 1:
+                    tokens.append(EON)
+
+            tokens.append(END_ONSET)
+
+        tokens.append(EOS)
+        return tokens, onset_times_ms
+
+    def decode_tokens_stage2(
+        self, tokens: List[int], onset_times_ms: Optional[List[int]] = None
+    ) -> List[Dict]:
+        """Decode a stage‑2 token sequence back to notes.
+
+        If *onset_times_ms* is provided it supplies the absolute timestamps
+        for each ``<ONSET>`` block; otherwise timestamps default to 0.
+        """
+        notes: List[Dict] = []
+        pos = 1  # skip SOS
+
+        if pos >= len(tokens) or tokens[pos] != CC:
+            raise ValueError(f"Expected CC token at position {pos}")
+        pos += 1
+
+        onset_idx = 0
+
+        while pos < len(tokens):
+            tok = tokens[pos]
+
+            if tok == EOS:
+                break
+
+            if tok != ONSET:
+                raise ValueError(
+                    f"Expected ONSET token at position {pos}, got {tok}"
+                )
+            pos += 1
+
+            onset_ms = (
+                onset_times_ms[onset_idx]
+                if onset_times_ms is not None and onset_idx < len(onset_times_ms)
+                else 0
+            )
+            onset_idx += 1
+
+            while pos < len(tokens):
+                tok = tokens[pos]
+
+                if tok == END_ONSET:
+                    pos += 1
+                    break
+                if tok == EOS:
+                    break
+
+                # Decode one note (no time offset — timestamp comes from ONSET)
+                kind = _inv_name(tokens[pos], "KIND_")
+                pos += 1
+                note_pos = _inv_name(tokens[pos], "POS_")
+                pos += 1
+
+                # Decorations
+                decos: List[str] = []
+                while tokens[pos] in (DECO_BREAK, DECO_EX, DECO_FIREWORK):
+                    decos.append(_inv_name(tokens[pos], "DECO_"))
+                    pos += 1
+                if tokens[pos] == DECO_NONE:
+                    pos += 1
+                    decos = []
+
+                # Wait (Slide only)
+                wait = None
+                if kind == "Slide" and tokens[pos] == WAIT:
+                    pos += 1
+                    wait, pos = self._decode_duration(tokens, pos)
+
+                # Duration (Hold, TouchHold, Slide)
+                duration = None
+                if kind in ("Hold", "Slide", "TouchHold"):
+                    duration, pos = self._decode_duration(tokens, pos)
+
+                # Slide segments
+                slide_segments: List[Dict] = []
+                slide_deco: List[str] = []
+                if kind == "Slide":
+                    while tokens[pos] == SEG:
+                        pos += 1
+                        shape = _inv_name(tokens[pos], "SHAPE_")
+                        pos += 1
+                        if shape == "Reflect":
+                            reflect_pos = _inv_name(tokens[pos], "POS_")
+                            pos += 1
+                            end_pos = _inv_name(tokens[pos], "POS_")
+                            pos += 1
+                            slide_segments.append(
+                                {"shape": {"Reflect": reflect_pos}, "end": end_pos}
+                            )
+                        else:
+                            end_pos = _inv_name(tokens[pos], "POS_")
+                            pos += 1
+                            slide_segments.append(
+                                {"shape": shape, "end": end_pos}
+                            )
+                    if tokens[pos] == SEG_END:
+                        pos += 1
+
+                    # Slide decorations
+                    while tokens[pos] in (SLIDE_DECO_BREAK,):
+                        slide_deco.append(_inv_name(tokens[pos], "SLIDE_DECO_"))
+                        pos += 1
+                    if tokens[pos] == SLIDE_DECO_NONE:
+                        pos += 1
+                        slide_deco = []
+
+                notes.append(
+                    {
+                        "timestamp_ms": onset_ms,
+                        "kind": kind,
+                        "pos": note_pos,
+                        "deco": decos,
+                        "wait": wait,
+                        "duration": duration,
+                        "slide_segments": slide_segments,
+                        "slide_deco": slide_deco,
+                    }
+                )
+
+                if tokens[pos] == EON:
+                    pos += 1
+
+        return notes
+
     @staticmethod
     def _decode_notes_standalone(tokens: List[int]) -> List[Dict]:
         """Decode tokens without requiring a BPM list (for val logging)."""
         dummy = ChartTokenizer([{"bpm10": 1500, "change_timestamp_ms": 0}])
         return dummy.decode_tokens(tokens)
+
+    @staticmethod
+    def _decode_notes_standalone_stage2(
+        tokens: List[int], onset_times_ms: Optional[List[int]] = None
+    ) -> List[Dict]:
+        """Decode stage‑2 tokens without requiring a BPM list."""
+        dummy = ChartTokenizer([{"bpm10": 1500, "change_timestamp_ms": 0}])
+        return dummy.decode_tokens_stage2(tokens, onset_times_ms)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
