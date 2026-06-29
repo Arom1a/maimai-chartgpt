@@ -538,6 +538,9 @@ def train_stage2(cfg: Stage2TrainConfig) -> None:
         _val_decode_sample(model, dl_val, device)
 
         if epoch % cfg.save_every_epochs == 0:
+            _val_density_report(model, dl_val, device, epoch)
+
+        if epoch % cfg.save_every_epochs == 0:
             _save_checkpoint(
                 model, optimizer, scheduler,
                 epoch, global_step, best_val_loss,
@@ -636,6 +639,82 @@ def _build_tokens_from_onset_mask(
 # ═══════════════════════════════════════════════════════════════════════════════
 # Validation
 # ═══════════════════════════════════════════════════════════════════════════════
+
+
+@torch.no_grad()
+def _val_density_report(
+    model: Stage2Model,
+    dl_val: DataLoader,
+    device: torch.device,
+    epoch: int,
+    max_batches: int = 30,
+) -> None:
+    """Log predicted onset density per chart-constant bin.
+
+    Computes the Pearson correlation between chart constant and
+    generated note count to verify difficulty conditioning works.
+    """
+    from src.tokenizer import CC as _CC, ONSET as _O, END_ONSET as _EO, EOS as _E, SOS as _S
+    from src.token_validator import Stage2Validator
+    import numpy as np
+
+    model.eval()
+    const_bins: dict[int, list] = {}  # cc → [note_counts]
+
+    n = 0
+    for batch in dl_val:
+        if n >= max_batches:
+            break
+        spectrogram = batch["spectrogram"].to(device)
+        bpm_signal = batch["bpm_signal"].to(device)
+        chart_constant = batch["chart_constant"].to(device)
+        onset_times_ms = batch["onset_times_ms_stage2"]
+
+        for b in range(len(onset_times_ms)):
+            cc = chart_constant[b].item()
+            oms = [round(t.item()) for t in onset_times_ms[b]]
+            if not oms:
+                continue
+
+            try:
+                gen = model.generate(
+                    spectrogram[b:b + 1],
+                    bpm_signal[b:b + 1],
+                    chart_constant[b:b + 1],
+                    onset_times_ms=oms,
+                    max_notes_per_onset=16,
+                    temperature=0.0,
+                    validator=Stage2Validator(),
+                )
+                # Count non-meta tokens as proxy for note complexity
+                note_tokens = sum(
+                    1 for t in gen
+                    if t not in (_S, _CC, _O, _EO, _E, 0)
+                )
+                const_bins.setdefault(cc, []).append(note_tokens)
+            except Exception:
+                pass
+        n += 1
+
+    if len(const_bins) < 3:
+        return
+
+    # Compute per-bin stats and correlation
+    consts = []
+    means = []
+    for cc in sorted(const_bins):
+        vals = const_bins[cc]
+        consts.append(cc / 10.0)
+        means.append(np.mean(vals))
+
+    if len(consts) >= 3:
+        r = np.corrcoef(consts, means)[0, 1]
+        print(
+            f"  [density e{epoch}] "
+            f"{len(consts)} bins, ρ={r:.3f} "
+            f"(range {consts[0]:.1f}→{consts[-1]:.1f}: "
+            f"{means[0]:.0f}→{means[-1]:.0f} tokens)"
+        )
 
 
 @torch.no_grad()

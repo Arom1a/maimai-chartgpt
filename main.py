@@ -1,16 +1,21 @@
-"""Inference script — generate a maimai chart from an audio file.
+"""Inference — generate a maimai chart from an audio file.
 
-Two ways to supply BPM information (pick one):
+Two modes are available:
 
-1. Constant BPM::
+Single‑stage (original ChartGPT)::
 
     python main.py --checkpoint model.pt --audio track.mp3 \\
         --bpm 175.0 --constant "12,5" --title "My Song"
 
-2. Chart metadata file (supports variable BPM)::
+Two‑stage (onset detector → note generator)::
 
-    python main.py --checkpoint model.pt --audio track.mp3 \\
-        --chart_metadata meta.json --constant "12,5"
+    python main.py --checkpoint checkpoints/stage2/best.pt \\
+        --stage1_checkpoint checkpoints/stage1/gate_best.pt \\
+        --audio track.mp3 --bpm 175.0 --constant "12,5"
+
+When ``--stage1_checkpoint`` is provided, two‑stage mode is used:
+Stage 1 detects onset timestamps; Stage 2 generates notes within each
+onset block.  Otherwise the legacy single‑stage model is used.
 """
 
 from __future__ import annotations
@@ -81,6 +86,190 @@ def _load_bpm10_list(args) -> tuple[list[dict], str | None, str | None]:
     raise ValueError("One of --bpm or --chart_metadata is required")
 
 
+def _infer_two_stage(
+    args,
+    device: torch.device,
+    mel_mean,
+    mel_std,
+    bpm10_list: list[dict],
+    title: str,
+    artist: str,
+    major: int,
+    minor: int,
+    chart_const: int,
+) -> None:
+    """Two‑stage inference: Stage 1 onsets → Stage 2 notes."""
+    from src.stage1_model import Stage1Model
+    from src.stage2_model import Stage2Config, Stage2Model
+    from src.token_validator import Stage2Validator
+
+    # ── Load Stage 2 model ────────────────────────────────────────────
+    checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=True)
+    if "config" in checkpoint:
+        cfg_d = checkpoint["config"]
+        model_cfg = Stage2Config(**cfg_d)
+        print(
+            f"Stage2 config: d_model={cfg_d['d_model']}, "
+            f"nhead={cfg_d['nhead']}, layers={cfg_d['num_decoder_layers']}"
+        )
+    else:
+        model_cfg = Stage2Config()
+        print("Warning: no config in checkpoint, using defaults")
+    s2 = Stage2Model(model_cfg).to(device)
+    s2.load_state_dict(checkpoint["model_state_dict"])
+    s2.eval()
+    n2 = sum(p.numel() for p in s2.parameters())
+    print(f"Loaded Stage 2 model ({n2 / 1e6:.1f}M params)")
+    if "epoch" in checkpoint:
+        print(f"  epoch {checkpoint['epoch']}")
+
+    # ── Load Stage 1 model ────────────────────────────────────────────
+    s1_ckpt = torch.load(args.stage1_checkpoint, map_location="cpu", weights_only=True)
+    s1_cfg = s1_ckpt.get("config", {})
+    s1 = Stage1Model(
+        n_mels=s1_cfg.get("n_mels", 80),
+        cond_dim=s1_cfg.get("cond_dim", 1),
+        gate_d_model=s1_cfg.get("gate_d_model", 512),
+        use_difficulty_gate=s1_cfg.get("use_difficulty_gate", True),
+    ).to(device)
+    s1.load_state_dict(s1_ckpt["model_state_dict"])
+    s1.eval()
+    n1 = sum(p.numel() for p in s1.parameters())
+    print(f"Loaded Stage 1 model ({n1 / 1e3:.0f}k params)")
+    if "epoch" in s1_ckpt:
+        print(f"  epoch {s1_ckpt['epoch']}, stage={s1_ckpt.get('stage', '?')}")
+
+    # ── Audio → mel ───────────────────────────────────────────────────
+    waveform = _load_audio_ffmpeg(args.audio, TARGET_SAMPLE_RATE).to(device)
+    mel_transform = torchaudio.transforms.MelSpectrogram(
+        sample_rate=TARGET_SAMPLE_RATE,
+        n_fft=MEL_WIN_LENGTH,
+        hop_length=MEL_HOP_LENGTH,
+        n_mels=N_MELS,
+    ).to(device)
+    mel_spec = mel_transform(waveform)
+    mel_spec = torch.log(torch.clamp(mel_spec, min=1e-6))
+    if mel_mean is not None:
+        mel_spec = (
+            (mel_spec - mel_mean.unsqueeze(1))
+            / mel_std.unsqueeze(1).clamp(min=1e-6)
+        )
+    else:
+        mel_spec = (
+            (mel_spec - mel_spec.mean(dim=1, keepdim=True))
+            / mel_spec.std(dim=1, keepdim=True).clamp(min=1e-6)
+        )
+    mel_spec = mel_spec.unsqueeze(0)
+    print(
+        f"Mel spectrogram: {mel_spec.shape}, "
+        f"{mel_spec.shape[2] * 10 / 1000:.1f}s audio"
+    )
+
+    # ── BPM signal ─────────────────────────────────────────────────────
+    bpm_signal = _build_bpm_signal(
+        bpm10_list, mel_spec.shape[2], device
+    ).unsqueeze(0)
+    const_t = torch.tensor([chart_const], dtype=torch.long, device=device)
+
+    # ═══════════════════════════════════════════════════════
+    # Stage 1: onset detection
+    # ═══════════════════════════════════════════════════════
+    print("Stage 1: detecting onsets …")
+    t1 = time.perf_counter()
+    with torch.no_grad():
+        logits = s1(mel_spec, const_t, bpm_signal)
+        probs = torch.sigmoid(logits).squeeze(0)
+
+    binary = (probs > args.onset_threshold).float()
+    if args.onset_min_gap > 0:
+        gap_frames = args.onset_min_gap // 10
+        indices = torch.nonzero(binary).squeeze(1)
+        if indices.numel() > 1:
+            keep = [indices[0].item()]
+            for idx in indices[1:]:
+                if idx.item() - keep[-1] >= gap_frames:
+                    keep.append(idx.item())
+            binary = torch.zeros_like(binary)
+            for k in keep:
+                binary[k] = 1.0
+
+    onset_frames = torch.nonzero(binary).squeeze(1)
+    onset_times = [f.item() * 10 for f in onset_frames]
+    print(
+        f"  Detected {len(onset_times)} onsets "
+        f"in {time.perf_counter() - t1:.1f}s"
+    )
+    if onset_times:
+        print(f"  Range: {onset_times[0]}–{onset_times[-1]} ms")
+
+    # ═══════════════════════════════════════════════════════
+    # Stage 2: note generation
+    # ═══════════════════════════════════════════════════════
+    if not onset_times:
+        print("Warning: no onsets detected, skipping Stage 2")
+        notes = []
+    else:
+        print(f"Stage 2: generating notes (temperature={args.temperature}) …")
+        t2 = time.perf_counter()
+        validator = Stage2Validator(bpm10_list)
+        with torch.no_grad():
+            tokens = s2.generate(
+                mel_spec,
+                bpm_signal,
+                const_t,
+                onset_times_ms=onset_times,
+                max_notes_per_onset=args.max_notes_per_onset,
+                temperature=args.temperature,
+                validator=validator,
+            )
+        elapsed = time.perf_counter() - t2
+        print(
+            f"  Generated {len(tokens)} tokens in {elapsed:.1f}s "
+            f"({len(tokens) / elapsed:.0f} tok/s)"
+        )
+        tokenizer = ChartTokenizer(bpm10_list)
+        try:
+            notes = tokenizer.decode_tokens_stage2(tokens, onset_times)
+            print(f"  Decoded {len(notes)} notes")
+        except Exception as e:
+            print(f"  Decode failed: {e}")
+            notes = []
+
+    # ── Note distribution ──────────────────────────────────────────────
+    if notes:
+        kind_counts: dict[str, int] = {}
+        for n in notes:
+            kind_counts[n["kind"]] = kind_counts.get(n["kind"], 0) + 1
+        print("Note distribution:")
+        for kind in ("Tap", "Hold", "Slide", "Touch", "TouchHold"):
+            if kind in kind_counts:
+                print(f"  {kind}: {kind_counts[kind]}")
+
+    # ── Output ─────────────────────────────────────────────────────────
+    output = {
+        "title": title,
+        "artist": artist,
+        "cabinet": "DX",
+        "version": "Generated",
+        "charts": [
+            {
+                "constant": [major, minor],
+                "designer": "ChartGPT-Stage2",
+                "bpm10_list": bpm10_list,
+                "notes": notes,
+            }
+        ],
+    }
+    if args.output:
+        with open(args.output, "w") as f:
+            json.dump(output, f, indent=2, ensure_ascii=False)
+        print(f"Saved chart to {args.output}")
+    elif notes:
+        print(f"\nFirst 5 notes (of {len(notes)}):")
+        for n in notes[:5]:
+            print(json.dumps(n, indent=2))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Generate a maimai chart from audio",
@@ -97,6 +286,11 @@ examples:
     )
     parser.add_argument(
         "--checkpoint", required=True, help="Model checkpoint (.pt)"
+    )
+    parser.add_argument(
+        "--stage1_checkpoint",
+        help="Stage 1 onset-detector checkpoint (.pt).  "
+             "When provided, two‑stage inference is used.",
     )
     parser.add_argument(
         "--audio", required=True, help="Input audio file (mp3/wav)"
@@ -138,6 +332,24 @@ examples:
         type=float,
         default=1.0,
         help="Sampling temperature (0 = greedy)",
+    )
+    parser.add_argument(
+        "--onset_threshold",
+        type=float,
+        default=0.5,
+        help="Stage 1 onset threshold (two‑stage only)",
+    )
+    parser.add_argument(
+        "--onset_min_gap",
+        type=int,
+        default=30,
+        help="Min gap between onsets in ms (two‑stage only)",
+    )
+    parser.add_argument(
+        "--max_notes_per_onset",
+        type=int,
+        default=32,
+        help="Max notes per onset block (two‑stage only)",
     )
     parser.add_argument(
         "--device",
@@ -206,6 +418,13 @@ examples:
     major, minor = map(int, args.constant.split(","))
     chart_const = major * 10 + minor
     print(f"Chart constant: {major}.{minor}")
+
+    # ── Branch: two‑stage or single‑stage ───────────────────────────────
+    if args.stage1_checkpoint:
+        _infer_two_stage(args, device, mel_mean, mel_std,
+                         bpm10_list, title, artist,
+                         major, minor, chart_const)
+        return
 
     # ── Load audio → mel spectrogram ────────────────────────────────────
     waveform = _load_audio_ffmpeg(args.audio, TARGET_SAMPLE_RATE).to(device)
