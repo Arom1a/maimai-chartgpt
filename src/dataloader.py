@@ -246,12 +246,20 @@ class MaiMaiDataset(Dataset):
         abs_times_raw = compute_abs_times(tokens)
         abs_times = torch.tensor(abs_times_raw, dtype=torch.float32)
 
+        # ── Onset labels (Stage 1 training target) ────────────────────────
+        onset_labels = torch.zeros(T_spec, dtype=torch.float32)
+        for note in chart["notes"]:
+            frame = round(note["timestamp_ms"] / 10.0)
+            for f in range(max(0, frame - 1), min(T_spec, frame + 2)):
+                onset_labels[f] = 1.0
+
         return {
             "spectrogram": mel_spec,  # (n_mels, T_spec)
             "bpm_signal": bpm_signal,  # (T_spec,)
             "tokens": torch.tensor(tokens, dtype=torch.long),
             "chart_constant": torch.tensor(chart_const, dtype=torch.long),
             "abs_times": abs_times,  # (len(tokens),)
+            "onset_labels": onset_labels,  # (T_spec,)
         }
 
 
@@ -272,6 +280,7 @@ def collate_fn(batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
     tokens = []
     consts = []
     ts = []
+    onsets = []
     spec_masks = []
     tok_masks = []
 
@@ -286,6 +295,7 @@ def collate_fn(batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
         bpms.append(F.pad(item["bpm_signal"], (0, spec_pad)))
         tokens.append(F.pad(item["tokens"], (0, tok_pad), value=PAD))
         ts.append(F.pad(item["abs_times"], (0, tok_pad)))
+        onsets.append(F.pad(item["onset_labels"], (0, spec_pad)))
         consts.append(item["chart_constant"])
 
         spec_masks.append(
@@ -311,6 +321,7 @@ def collate_fn(batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
         "tokens": torch.stack(tokens),  # (B, L_max)
         "chart_constant": torch.stack(consts),  # (B,)
         "abs_times": torch.stack(ts),  # (B, L_max)
+        "onset_labels": torch.stack(onsets),  # (B, T_spec_max)
         "spec_mask": torch.stack(spec_masks),  # (B, T_spec_max)
         "tok_mask": torch.stack(tok_masks),  # (B, L_max)
     }
