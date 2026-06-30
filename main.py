@@ -4,14 +4,14 @@ Two modes are available:
 
 Single‑stage (original ChartGPT)::
 
-    python main.py --checkpoint model.pt --audio track.mp3 \\
-        --bpm 175.0 --constant "12,5" --title "My Song"
+    python main.py --stage2_checkpoint model.pt --audio track.mp3 \\
+        --bpm 175.0 --constant "12.5" --title "My Song"
 
 Two‑stage (onset detector → note generator)::
 
-    python main.py --checkpoint checkpoints/stage2/best.pt \\
+    python main.py --stage2_checkpoint checkpoints/stage2/best.pt \\
         --stage1_checkpoint checkpoints/stage1/gate_best.pt \\
-        --audio track.mp3 --bpm 175.0 --constant "12,5"
+        --audio track.mp3 --bpm 175.0 --constant "12.5"
 
 When ``--stage1_checkpoint`` is provided, two‑stage mode is used:
 Stage 1 detects onset timestamps; Stage 2 generates notes within each
@@ -104,7 +104,7 @@ def _infer_two_stage(
     from src.token_validator import Stage2Validator
 
     # ── Load Stage 2 model ────────────────────────────────────────────
-    checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=True)
+    checkpoint = torch.load(args.stage2_checkpoint, map_location="cpu", weights_only=True)
     if "config" in checkpoint:
         cfg_d = checkpoint["config"]
         model_cfg = Stage2Config(**cfg_d)
@@ -277,15 +277,16 @@ def main() -> None:
         epilog="""\
 examples:
   # constant BPM
-  python main.py --checkpoint model.pt --audio track.mp3 \\
-      --bpm 175.0 --constant "12,5" --title "My Song"
+  python main.py --stage2_checkpoint model.pt --audio track.mp3 \\
+      --bpm 175.0 --constant "12.5" --title "My Song"
 
   # variable BPM from metadata file
-  python main.py --checkpoint model.pt --audio track.mp3 \\
-      --chart_metadata meta.json --constant "13,2\"""",
+  python main.py --stage2_checkpoint model.pt --audio track.mp3 \\
+      --chart_metadata meta.json --constant "13.2\"""",
     )
     parser.add_argument(
-        "--checkpoint", required=True, help="Model checkpoint (.pt)"
+        "--stage2_checkpoint", required=True,
+        help="Stage 2 note-generator checkpoint (.pt)",
     )
     parser.add_argument(
         "--stage1_checkpoint",
@@ -311,7 +312,7 @@ examples:
     parser.add_argument(
         "--constant",
         required=True,
-        help='Desired difficulty constant, e.g. "12,5"',
+        help='Desired difficulty constant, e.g. "12.5"',
     )
     parser.add_argument(
         "--title",
@@ -384,7 +385,7 @@ examples:
         mel_std = None
 
     # ── Load checkpoint ─────────────────────────────────────────────────
-    checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=True)
+    checkpoint = torch.load(args.stage2_checkpoint, map_location="cpu", weights_only=True)
     if "config" in checkpoint:
         cfg_dict = checkpoint["config"]
         model_cfg = ChartGPTConfig(**cfg_dict)
@@ -415,7 +416,7 @@ examples:
           f"({len(bpm10_list)} change{'s' if len(bpm10_list) > 1 else ''})")
 
     # ── Chart constant ──────────────────────────────────────────────────
-    major, minor = map(int, args.constant.split(","))
+    major, minor = map(int, args.constant.split("."))
     chart_const = major * 10 + minor
     print(f"Chart constant: {major}.{minor}")
 

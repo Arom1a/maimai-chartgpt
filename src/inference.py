@@ -7,7 +7,7 @@ Usage::
         --stage2_checkpoint checkpoints/stage2/best.pt \\
         --audio track.mp3 \\
         --bpm 175.0 \\
-        --constant "12,5" \\
+        --constant "12.5" \\
         --title "My Song"
 """
 
@@ -194,7 +194,7 @@ def main() -> None:
 
     parser.add_argument(
         "--constant", required=True,
-        help='Target difficulty, e.g. "12,5"',
+        help='Target difficulty, e.g. "12.5"',
     )
     parser.add_argument("--title", help="Song title")
     parser.add_argument("--artist", help="Song artist")
@@ -253,7 +253,7 @@ def main() -> None:
     )
 
     # ── Chart constant ─────────────────────────────────────────────────
-    major, minor = map(int, args.constant.split(","))
+    major, minor = map(int, args.constant.split("."))
     chart_const = major * 10 + minor
     print(f"Chart constant: {major}.{minor}")
 
