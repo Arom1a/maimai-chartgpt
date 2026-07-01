@@ -14,8 +14,10 @@ Requires `ffmpeg` on PATH for audio decoding.
 ## 0. Pre‑process the data
 
 ```bash
+# Convert simai files
+cargo run --release
 # Compute mel spectrogram normalization stats (per‑channel mean/std)
-uv run python -c "from src.dataloader import compute_mel_stats; import torch; mean, std = compute_mel_stats('./dataset', max_files=200, device='cpu'); torch.save({'mean': mean, 'std': std}, './dataset/mel_stats.pt'); print('Saved mel_stats.pt')"
+uv run python -c "from src.dataloader import compute_mel_stats; import torch; mean, std = compute_mel_stats('./dataset', max_files=800, device='cpu'); torch.save({'mean': mean, 'std': std}, './dataset/mel_stats.pt'); print('Saved mel_stats.pt')"
 ```
 
 ## 1. Train the model
@@ -29,7 +31,7 @@ uv run python -m src.stage1_train --data_dir ./dataset --stats_file ./dataset/me
 **Stage 2 — Note generator** (scheduled sampling with trained Stage 1):
 
 ```bash
-uv run python -m src.stage2_train --data_dir ./dataset --stats_file ./dataset/mel_stats.pt --stage1_checkpoint ./checkpoints/stage1/gate_best.pt --batch_size 4 --epochs 50 --device cuda --checkpoint_dir ./checkpoints/stage2
+uv run python -m src.stage2_train --data_dir ./dataset --stats_file ./dataset/mel_stats.pt --stage1_checkpoint ./checkpoints/stage1/gate_best.pt --batch_size 2 --epochs 50 --device cuda --checkpoint_dir ./checkpoints/stage2
 ```
 
 ### Pause and resume
